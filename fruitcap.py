@@ -4,10 +4,12 @@
 Author: Phil Jensen <philj@philandamy.org>
 """
 
+import argparse
 import configparser
 import ctypes
 import ctypes.util
 import os
+import signal
 import sys
 import threading
 import time
@@ -485,7 +487,89 @@ def check_camera_permission():
         sys.exit(1)
 
 
+class PreviewAppDelegate(Foundation.NSObject):
+    def init(self):
+        self = objc.super(PreviewAppDelegate, self).init()
+        if self is None:
+            return None
+        self.recorder = None
+        return self
+
+    def applicationShouldTerminateAfterLastWindowClosed_(self, app):
+        return True
+
+    def applicationShouldTerminate_(self, sender):
+        if self.recorder:
+            self.recorder.stop()
+        return 1  # NSTerminateNow
+
+
+def run_with_preview(recorder):
+    import AppKit
+
+    app = AppKit.NSApplication.sharedApplication()
+    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)
+
+    delegate = PreviewAppDelegate.alloc().init()
+    delegate.recorder = recorder
+    app.setDelegate_(delegate)
+
+    # Create 16:9 preview window
+    preview_width = 480
+    preview_height = 270
+    rect = Foundation.NSMakeRect(100, 100, preview_width, preview_height)
+    style = (
+        AppKit.NSWindowStyleMaskTitled
+        | AppKit.NSWindowStyleMaskClosable
+        | AppKit.NSWindowStyleMaskMiniaturizable
+        | AppKit.NSWindowStyleMaskResizable
+    )
+    window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        rect, style, AppKit.NSBackingStoreBuffered, False
+    )
+    window.setTitle_("fruitcap preview")
+    window.setAspectRatio_(Foundation.NSMakeSize(16, 9))
+
+    content_view = window.contentView()
+    content_view.setWantsLayer_(True)
+
+    preview_layer = AVF.AVCaptureVideoPreviewLayer.layerWithSession_(recorder.session)
+    preview_layer.setVideoGravity_(AVF.AVLayerVideoGravityResizeAspect)
+    preview_layer.setFrame_(content_view.bounds())
+    # kCALayerWidthSizable | kCALayerHeightSizable
+    preview_layer.setAutoresizingMask_(2 | 16)
+    content_view.layer().addSublayer_(preview_layer)
+
+    window.makeKeyAndOrderFront_(None)
+    app.activateIgnoringOtherApps_(True)
+
+    # Press 'q' in the preview window to stop recording
+    def key_handler(event):
+        if event.characters() == "q":
+            app.terminate_(None)
+            return None
+        return event
+
+    AppKit.NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+        AppKit.NSEventMaskKeyDown, key_handler
+    )
+
+    # Allow Ctrl+C from the terminal to stop cleanly
+    signal.signal(signal.SIGINT, lambda *_: app.terminate_(None))
+
+    # Keep a reference so the window isn't garbage collected
+    delegate.window = window
+
+    app.run()
+
+
 def main():
+    parser = argparse.ArgumentParser(description="macOS video/audio capture tool")
+    parser.add_argument(
+        "--preview", action="store_true", help="Show a live preview window"
+    )
+    args = parser.parse_args()
+
     cfg = load_config()
     check_camera_permission()
     if cfg["audio_enabled"]:
@@ -499,15 +583,17 @@ def main():
     recorder.setup_writer()
     recorder.start()
 
-    try:
-        while True:
-            line = input()
-            if line.strip().lower() == "q":
-                break
-    except (KeyboardInterrupt, EOFError):
-        pass
-
-    recorder.stop()
+    if args.preview:
+        run_with_preview(recorder)
+    else:
+        try:
+            while True:
+                line = input()
+                if line.strip().lower() == "q":
+                    break
+        except (KeyboardInterrupt, EOFError):
+            pass
+        recorder.stop()
 
 
 if __name__ == "__main__":

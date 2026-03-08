@@ -387,10 +387,19 @@ class Recorder:
                 AVF.AVVideoProfileLevelKey: AVF.AVVideoProfileLevelH264HighAutoLevel,
             }
 
+        # Explicitly tag color space to prevent VideoToolbox from guessing wrong
+        # (e.g., tagging BT.709 content as BT.2020, causing luminance shifts)
+        color_properties = {
+            AVF.AVVideoColorPrimariesKey: AVF.AVVideoColorPrimaries_ITU_R_709_2,
+            AVF.AVVideoTransferFunctionKey: AVF.AVVideoTransferFunction_ITU_R_709_2,
+            AVF.AVVideoYCbCrMatrixKey: AVF.AVVideoYCbCrMatrix_ITU_R_709_2,
+        }
+
         output_settings = {
             AVF.AVVideoCodecKey: codec_type,
             AVF.AVVideoWidthKey: width,
             AVF.AVVideoHeightKey: height,
+            AVF.AVVideoColorPropertiesKey: color_properties,
             AVF.AVVideoCompressionPropertiesKey: compression_settings,
         }
 
@@ -451,8 +460,8 @@ class Recorder:
             f"({self.cfg['width']}x{self.cfg['height']}, "
             f"{codec_label}, {self.cfg['bit_depth']}-bit {self.cfg['chroma']}, "
             f"{self.cfg['bitrate'] / 1_000_000:.1f} Mbps"
-            f"{f', {self.cfg[\"fps\"]:g}fps' if self.cfg['fps'] else ''}"
-            f"{audio_label})"
+            + (f", {self.cfg['fps']:g}fps" if self.cfg['fps'] else "")
+            + f"{audio_label})"
         )
         print("Press 'q' then Enter to stop recording.")
 

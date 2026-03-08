@@ -1,6 +1,6 @@
 # fruitcap
 
-A macOS command-line tool for video and audio capture using AVFoundation with Apple hardware-accelerated H.264/H.265 encoding.
+A macOS command-line tool for video and audio capture using AVFoundation with Apple hardware-accelerated H.264/H.265/ProRes encoding.
 
 Author: Phil Jensen <philj@philandamy.org>
 
@@ -17,22 +17,75 @@ pip install pyobjc-framework-AVFoundation pyobjc-framework-CoreMedia pyobjc-fram
 ## Usage
 
 ```bash
-python3 fruitcap.py
+python3 fruitcap.py [options]
 ```
 
 Press `q` then Enter to stop recording. A live status line shows elapsed time, frames captured, file size, and any dropped frames.
 
+### Common Examples
+
+```bash
+# Record with defaults from fruitcap.cfg
+python3 fruitcap.py
+
+# Record 10 seconds of ProRes 422 (auto-selects MOV, 10-bit 4:2:2, PCM audio)
+python3 fruitcap.py --codec prores --time 10
+
+# Record H.265 at 50 Mbps with preview
+python3 fruitcap.py --codec h265 --bitrate 50m --preview
+
+# List available capture devices
+python3 fruitcap.py --list-devices
+
+# List supported formats for a specific device
+python3 fruitcap.py --device "DNxIO" --list-formats
+
+# Record from a specific device with timestamped output
+python3 fruitcap.py --device 1 -o "capture_%d_%t.mp4"
+
+# Record with segment splitting every 5 minutes
+python3 fruitcap.py --split-every 300
+```
+
+### CLI Options
+
+| Flag | Description |
+|------|-------------|
+| `--codec` | Video codec: `h264`, `h265`, `prores`, `prores_proxy`, `prores_lt`, `prores_hq` |
+| `--container` | Container format: `mp4`, `mov` (auto-selects based on codec) |
+| `--bitrate` | Video bitrate, e.g. `80m`, `500k`, `150000000` |
+| `--resolution` | `4k`, `1080p`, `720p`, or `WIDTHxHEIGHT` |
+| `--fps` | Frame rate, e.g. `29.97`, `24`, `60` |
+| `--chroma` | Chroma subsampling: `420` or `422` |
+| `--bit-depth` | Bit depth: `8` or `10` |
+| `--color-space` | Color space: `bt709`, `bt2020`, `hlg`, `pq` |
+| `-o`, `--output` | Output file path (supports `%d` date, `%t` time tokens) |
+| `--no-overwrite` | Append `_1`, `_2`, etc. instead of overwriting |
+| `--config` | Path to alternate config file |
+| `--device` | Select video device by index or name substring |
+| `--audio-device` | Select audio device by index or name substring |
+| `--list-devices` | List available video and audio capture devices |
+| `--list-formats` | List supported pixel formats and frame rates for the selected device |
+| `--time` | Stop recording after N seconds (supports fractional) |
+| `--frames` | Stop recording after N frames |
+| `--preview` | Show live source preview window |
+| `--preview-compressed` | Show compressed output preview window |
+| `-p`, `--preview-both` | Show both source and compressed preview windows |
+| `-q`, `--quiet` | Suppress status output |
+| `--split-every` | Split into segments every N seconds |
+| `--split-size` | Split into segments at size threshold, e.g. `500m`, `2g` |
+
 ## Configuration
 
-Edit `fruitcap.cfg` to change capture settings:
+Edit `fruitcap.cfg` to set defaults. All settings can be overridden via CLI flags.
 
 ```ini
 [capture]
 resolution = 4k
-codec = h265
+codec = h264
 bit_depth = 8
 chroma = 420
-bitrate = 150000000
+bitrate = 80000000
 discard_late_frames = no
 output = capture.mp4
 
@@ -46,23 +99,33 @@ channels = 2
 
 ### Video Settings
 
-- **resolution** - `4k`, `1080p`, `720p`, or custom `WIDTHxHEIGHT` (e.g. `2560x1440`)
-- **codec** - `h264` or `h265` (hardware-accelerated)
-- **bit_depth** - `8` or `10` (10-bit requires h265)
-- **chroma** - `420` or `422` chroma subsampling
-- **bitrate** - Video bitrate in bits per second (150000000 = 150 Mbps)
-- **discard_late_frames** - `yes` to drop frames if the encoder falls behind, `no` to preserve all frames
-- **output** - Output file path (MP4)
+- **resolution** — `4k`, `1080p`, `720p`, or custom `WIDTHxHEIGHT`
+- **codec** — `h264`, `h265`, `prores`, `prores_proxy`, `prores_lt`, `prores_hq`
+- **container** — `mp4`, `mov`, or `auto` (ProRes auto-selects MOV)
+- **bit_depth** — `8` or `10` (10-bit requires H.265 or ProRes)
+- **chroma** — `420` or `422` chroma subsampling
+- **bitrate** — Video bitrate in bps or shorthand (`80m`, `500k`)
+- **fps** — Frame rate (omit for device native rate)
+- **color_space** — `bt709`, `bt2020`, `hlg`, `pq`
+- **discard_late_frames** — `yes` to drop frames if encoder falls behind
+- **output** — Output file path (`%d` = date, `%t` = time)
 
 ### Audio Settings
 
-- **capture** - `yes` or `no` to enable/disable audio recording
-- **codec** - `aac` (lossy) or `alac` (lossless)
-- **bitrate** - AAC bitrate in bits per second (ignored for ALAC)
-- **sample_rate** - Sample rate in Hz (48000 = 48 kHz)
-- **channels** - Number of audio channels
+- **capture** — `yes` or `no`
+- **codec** — `aac` (lossy), `alac` (lossless), or `pcm` (uncompressed 24-bit)
+- **bitrate** — AAC bitrate in bps (ignored for ALAC/PCM)
+- **sample_rate** — Sample rate in Hz
+- **channels** — Number of audio channels
 
-### Example: High-Quality 4K Capture (Blackmagic UltraStudio)
+### ProRes
+
+ProRes 422 variants are natively 10-bit 4:2:2 codecs. When ProRes is selected, fruitcap automatically:
+- Forces 10-bit 4:2:2 pixel format
+- Selects MOV container
+- Defaults audio to 24-bit PCM
+
+### Example: High-Quality 4K Capture (Avid DNxIO)
 
 ```ini
 [capture]
@@ -79,4 +142,10 @@ capture = yes
 codec = alac
 sample_rate = 48000
 channels = 2
+```
+
+## Tests
+
+```bash
+python3 -m pytest test_fruitcap.py -v
 ```

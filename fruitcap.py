@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""fruitcap - macOS video capture to H.264 using AVFoundation hardware encoder."""
+"""fruitcap - macOS video capture to H.264 using AVFoundation hardware encoder.
+
+Author: Phil Jensen <philj@philandamy.org>
+"""
 
 import configparser
 import ctypes

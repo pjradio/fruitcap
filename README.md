@@ -2,6 +2,8 @@
 
 A macOS command-line tool for video and audio capture using AVFoundation with Apple hardware-accelerated H.264/H.265 encoding.
 
+Author: Phil Jensen <philj@philandamy.org>
+
 ## Requirements
 
 - macOS

@@ -31,6 +31,76 @@ def dispatch_queue_create(label):
     return _libdispatch.dispatch_queue_create(label, None)
 
 
+# VideoToolbox / CoreMedia ctypes bindings for compressed preview
+_vt_lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("VideoToolbox"))
+_cm_lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreMedia"))
+
+kCMVideoCodecType_H264 = 0x61766331  # 'avc1'
+kCMVideoCodecType_HEVC = 0x68766331  # 'hvc1'
+
+
+class CMTimeStruct(ctypes.Structure):
+    _fields_ = [
+        ("value", ctypes.c_int64),
+        ("timescale", ctypes.c_int32),
+        ("flags", ctypes.c_uint32),
+        ("epoch", ctypes.c_int64),
+    ]
+
+
+VTOutputCallback = ctypes.CFUNCTYPE(
+    None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int32,
+    ctypes.c_uint32, ctypes.c_void_p,
+)
+
+_vt_lib.VTCompressionSessionCreate.restype = ctypes.c_int32
+_vt_lib.VTCompressionSessionCreate.argtypes = [
+    ctypes.c_void_p, ctypes.c_int32, ctypes.c_int32, ctypes.c_uint32,
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+    VTOutputCallback, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+]
+_vt_lib.VTCompressionSessionEncodeFrame.restype = ctypes.c_int32
+_vt_lib.VTCompressionSessionEncodeFrame.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p, CMTimeStruct, CMTimeStruct,
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+]
+_vt_lib.VTSessionSetProperty.restype = ctypes.c_int32
+_vt_lib.VTSessionSetProperty.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+]
+_vt_lib.VTCompressionSessionInvalidate.restype = None
+_vt_lib.VTCompressionSessionInvalidate.argtypes = [ctypes.c_void_p]
+
+_cm_lib.CMTimebaseCreateWithSourceClock.restype = ctypes.c_int32
+_cm_lib.CMTimebaseCreateWithSourceClock.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+]
+_cm_lib.CMTimebaseSetTime.restype = ctypes.c_int32
+_cm_lib.CMTimebaseSetTime.argtypes = [ctypes.c_void_p, CMTimeStruct]
+_cm_lib.CMTimebaseSetRate.restype = ctypes.c_int32
+_cm_lib.CMTimebaseSetRate.argtypes = [ctypes.c_void_p, ctypes.c_double]
+
+
+def _vt_cfstr(name):
+    """Load a CFString constant from VideoToolbox."""
+    return ctypes.c_void_p.in_dll(_vt_lib, name).value
+
+
+# CoreFoundation boolean constants and number creation for VTSession properties
+_cf_lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreFoundation"))
+_cf_true = ctypes.c_void_p.in_dll(_cf_lib, "kCFBooleanTrue").value
+_cf_false = ctypes.c_void_p.in_dll(_cf_lib, "kCFBooleanFalse").value
+_cf_lib.CFNumberCreate.restype = ctypes.c_void_p
+_cf_lib.CFNumberCreate.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_void_p]
+kCFNumberSInt64Type = 4
+
+
+def _cf_int(value):
+    """Create a CFNumber from a Python integer."""
+    val = ctypes.c_int64(value)
+    return _cf_lib.CFNumberCreate(None, kCFNumberSInt64Type, ctypes.byref(val))
+
+
 # CoreAudio format IDs (FourCC)
 kAudioFormatMPEG4AAC = 0x61616320      # 'aac '
 kAudioFormatAppleLossless = 0x616C6163  # 'alac'
@@ -145,6 +215,7 @@ class Recorder:
         self.start_time = None
         self.lock = threading.Lock()
         self.started_writing = threading.Event()
+        self.compressed_preview = None
 
     def find_device(self):
         devices = AVF.AVCaptureDevice.devicesWithMediaType_(AVF.AVMediaTypeVideo)
@@ -352,6 +423,8 @@ class Recorder:
 
     def stop(self):
         self.running = False
+        if self.compressed_preview:
+            self.compressed_preview.invalidate()
         self.session.stopRunning()
 
         if self.writer.status() == AVF.AVAssetWriterStatusWriting:
@@ -388,6 +461,8 @@ class Recorder:
                 if self.writer_input.isReadyForMoreMediaData():
                     self.writer_input.appendSampleBuffer_(sample_buffer)
                     self.frames_written += 1
+                    if self.compressed_preview:
+                        self.compressed_preview.encode_frame(sample_buffer)
                     self._update_status()
 
     def handle_audio_sample_buffer(self, sample_buffer):
@@ -433,6 +508,110 @@ class Recorder:
             f"size: {size_str}{dropped}   "
         )
         sys.stdout.flush()
+
+
+class CompressedPreview:
+    """Encode frames via VTCompressionSession and display the decoded result
+    through AVSampleBufferDisplayLayer, revealing compression artifacts."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.display_layer = None
+        self.session = None
+        self._callback_ref = None
+        self._timebase_ptr = None
+        self._timebase_started = False
+
+    def setup(self):
+        self.display_layer = AVF.AVSampleBufferDisplayLayer.alloc().init()
+        self.display_layer.setVideoGravity_(AVF.AVLayerVideoGravityResizeAspect)
+
+        # Control timebase so the layer presents frames in real time
+        host_clock = CoreMedia.CMClockGetHostTimeClock()
+        timebase_out = ctypes.c_void_p()
+        err = _cm_lib.CMTimebaseCreateWithSourceClock(
+            None, objc.pyobjc_id(host_clock), ctypes.byref(timebase_out)
+        )
+        if err != 0:
+            print(f"Warning: Could not create timebase for compressed preview (error {err})")
+            return False
+        self._timebase_ptr = timebase_out.value
+        timebase_obj = objc.objc_object(c_void_p=self._timebase_ptr)
+        self.display_layer.setControlTimebase_(timebase_obj)
+
+        # Create VTCompressionSession
+        codec = kCMVideoCodecType_HEVC if self.cfg["codec"] == "h265" else kCMVideoCodecType_H264
+        session_out = ctypes.c_void_p()
+        display_layer = self.display_layer
+
+        @VTOutputCallback
+        def output_callback(ref, source_ref, status, flags, sample_buffer):
+            if status != 0 or not sample_buffer:
+                return
+            sb_obj = objc.objc_object(c_void_p=sample_buffer)
+            if not self._timebase_started:
+                ts = CoreMedia.CMSampleBufferGetPresentationTimeStamp(sb_obj)
+                ts_struct = CMTimeStruct(ts.value, ts.timescale, ts.flags, ts.epoch)
+                _cm_lib.CMTimebaseSetTime(self._timebase_ptr, ts_struct)
+                _cm_lib.CMTimebaseSetRate(self._timebase_ptr, ctypes.c_double(1.0))
+                self._timebase_started = True
+            display_layer.enqueueSampleBuffer_(sb_obj)
+
+        self._callback_ref = output_callback
+
+        err = _vt_lib.VTCompressionSessionCreate(
+            None, self.cfg["width"], self.cfg["height"], codec,
+            None, None, None, output_callback, None, ctypes.byref(session_out),
+        )
+        if err != 0:
+            print(f"Warning: Could not create compression preview session (error {err})")
+            return False
+
+        self.session = session_out.value
+
+        # Match the writer's encoding settings
+        rt_key = _vt_cfstr("kVTCompressionPropertyKey_RealTime")
+        reorder_key = _vt_cfstr("kVTCompressionPropertyKey_AllowFrameReordering")
+        bitrate_key = _vt_cfstr("kVTCompressionPropertyKey_AverageBitRate")
+        profile_key = _vt_cfstr("kVTCompressionPropertyKey_ProfileLevel")
+
+        _vt_lib.VTSessionSetProperty(self.session, rt_key, _cf_true)
+        _vt_lib.VTSessionSetProperty(self.session, reorder_key, _cf_false)
+        _vt_lib.VTSessionSetProperty(self.session, bitrate_key, _cf_int(self.cfg["bitrate"]))
+
+        if self.cfg["codec"] == "h265":
+            chroma = self.cfg["chroma"]
+            bit_depth = self.cfg["bit_depth"]
+            if chroma == "422":
+                profile_val = _vt_cfstr("kVTProfileLevel_HEVC_Main42210_AutoLevel")
+            elif bit_depth == 10:
+                profile_val = _vt_cfstr("kVTProfileLevel_HEVC_Main10_AutoLevel")
+            else:
+                profile_val = _vt_cfstr("kVTProfileLevel_HEVC_Main_AutoLevel")
+        else:
+            profile_val = _vt_cfstr("kVTProfileLevel_H264_High_AutoLevel")
+        _vt_lib.VTSessionSetProperty(self.session, profile_key, profile_val)
+
+        return True
+
+    def encode_frame(self, sample_buffer):
+        if not self.session:
+            return
+        pixel_buffer = CoreMedia.CMSampleBufferGetImageBuffer(sample_buffer)
+        if pixel_buffer is None:
+            return
+        ts = CoreMedia.CMSampleBufferGetPresentationTimeStamp(sample_buffer)
+        ts_struct = CMTimeStruct(ts.value, ts.timescale, ts.flags, ts.epoch)
+        invalid_time = CMTimeStruct(0, 0, 0, 0)
+        _vt_lib.VTCompressionSessionEncodeFrame(
+            self.session, objc.pyobjc_id(pixel_buffer),
+            ts_struct, invalid_time, None, None, None,
+        )
+
+    def invalidate(self):
+        if self.session:
+            _vt_lib.VTCompressionSessionInvalidate(self.session)
+            self.session = None
 
 
 def check_microphone_permission():
@@ -504,7 +683,7 @@ class PreviewAppDelegate(Foundation.NSObject):
         return 1  # NSTerminateNow
 
 
-def run_with_preview(recorder):
+def run_with_preview(recorder, show_source=True, show_compressed=False):
     import AppKit
 
     app = AppKit.NSApplication.sharedApplication()
@@ -514,33 +693,59 @@ def run_with_preview(recorder):
     delegate.recorder = recorder
     app.setDelegate_(delegate)
 
-    # Create 16:9 preview window
     preview_width = 480
     preview_height = 270
-    rect = Foundation.NSMakeRect(100, 100, preview_width, preview_height)
     style = (
         AppKit.NSWindowStyleMaskTitled
         | AppKit.NSWindowStyleMaskClosable
         | AppKit.NSWindowStyleMaskMiniaturizable
         | AppKit.NSWindowStyleMaskResizable
     )
-    window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-        rect, style, AppKit.NSBackingStoreBuffered, False
-    )
-    window.setTitle_("fruitcap preview")
-    window.setAspectRatio_(Foundation.NSMakeSize(16, 9))
 
-    content_view = window.contentView()
-    content_view.setWantsLayer_(True)
+    windows = []
+    x_offset = 100
 
-    preview_layer = AVF.AVCaptureVideoPreviewLayer.layerWithSession_(recorder.session)
-    preview_layer.setVideoGravity_(AVF.AVLayerVideoGravityResizeAspect)
-    preview_layer.setFrame_(content_view.bounds())
-    # kCALayerWidthSizable | kCALayerHeightSizable
-    preview_layer.setAutoresizingMask_(2 | 16)
-    content_view.layer().addSublayer_(preview_layer)
+    if show_source:
+        rect = Foundation.NSMakeRect(x_offset, 100, preview_width, preview_height)
+        window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            rect, style, AppKit.NSBackingStoreBuffered, False
+        )
+        window.setTitle_("fruitcap preview")
+        window.setAspectRatio_(Foundation.NSMakeSize(16, 9))
 
-    window.makeKeyAndOrderFront_(None)
+        content_view = window.contentView()
+        content_view.setWantsLayer_(True)
+
+        preview_layer = AVF.AVCaptureVideoPreviewLayer.layerWithSession_(recorder.session)
+        preview_layer.setVideoGravity_(AVF.AVLayerVideoGravityResizeAspect)
+        preview_layer.setFrame_(content_view.bounds())
+        # kCALayerWidthSizable | kCALayerHeightSizable
+        preview_layer.setAutoresizingMask_(2 | 16)
+        content_view.layer().addSublayer_(preview_layer)
+
+        window.makeKeyAndOrderFront_(None)
+        windows.append(window)
+        x_offset += preview_width + 20
+
+    if show_compressed and recorder.compressed_preview:
+        rect = Foundation.NSMakeRect(x_offset, 100, preview_width, preview_height)
+        window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            rect, style, AppKit.NSBackingStoreBuffered, False
+        )
+        window.setTitle_("fruitcap compressed")
+        window.setAspectRatio_(Foundation.NSMakeSize(16, 9))
+
+        content_view = window.contentView()
+        content_view.setWantsLayer_(True)
+
+        layer = recorder.compressed_preview.display_layer
+        layer.setFrame_(content_view.bounds())
+        layer.setAutoresizingMask_(2 | 16)  # kCALayerWidthSizable | kCALayerHeightSizable
+        content_view.layer().addSublayer_(layer)
+
+        window.makeKeyAndOrderFront_(None)
+        windows.append(window)
+
     app.activateIgnoringOtherApps_(True)
 
     # Press 'q' in the preview window to stop recording
@@ -557,8 +762,8 @@ def run_with_preview(recorder):
     # Allow Ctrl+C from the terminal to stop cleanly
     signal.signal(signal.SIGINT, lambda *_: app.terminate_(None))
 
-    # Keep a reference so the window isn't garbage collected
-    delegate.window = window
+    # Keep references so windows aren't garbage collected
+    delegate.windows = windows
 
     app.run()
 
@@ -567,6 +772,10 @@ def main():
     parser = argparse.ArgumentParser(description="macOS video/audio capture tool")
     parser.add_argument(
         "--preview", action="store_true", help="Show a live preview window"
+    )
+    parser.add_argument(
+        "--preview-compressed", action="store_true",
+        help="Show a live preview of the compressor output",
     )
     args = parser.parse_args()
 
@@ -581,10 +790,19 @@ def main():
     audio_device = recorder.find_audio_device() if cfg["audio_enabled"] else None
     recorder.setup_session(device, audio_device)
     recorder.setup_writer()
+
+    if args.preview_compressed:
+        cp = CompressedPreview(cfg)
+        if cp.setup():
+            recorder.compressed_preview = cp
+        else:
+            print("Warning: Compressed preview unavailable, continuing without it.")
+
     recorder.start()
 
-    if args.preview:
-        run_with_preview(recorder)
+    if args.preview or args.preview_compressed:
+        run_with_preview(recorder, show_source=args.preview,
+                         show_compressed=args.preview_compressed)
     else:
         try:
             while True:

@@ -17,6 +17,7 @@ fruitcap is a macOS command-line video/audio capture tool written in Python. It 
 
 - `SampleBufferDelegate` — PyObjC delegate, routes video/audio sample buffers by comparing the output reference
 - `Recorder` — Manages session, writer, and all capture state
+- `CompressedPreview` — VTCompressionSession-based preview that re-encodes frames and displays them via AVSampleBufferDisplayLayer, showing compression artifacts in real time
 - `load_config()` — Parses `fruitcap.cfg`, validates settings (codec/bit_depth/chroma combinations)
 
 ### Config Options
@@ -31,6 +32,16 @@ The encoder sets the HEVC profile based on bit_depth and chroma config:
 - **8-bit 4:2:0** → Main (`HEVC_Main_AutoLevel`)
 - **10-bit 4:2:0** → Main 10 (`HEVC_Main10_AutoLevel`)
 - **4:2:2 (any bit depth)** → Main 4:2:2 10 (`HEVC_Main42210_AutoLevel`) — HEVC has no 8-bit-only 4:2:2 profile, so 8-bit 4:2:2 input is encoded as 10-bit 4:2:2
+
+### Preview Modes
+
+- `--preview` — Shows a live source preview window using `AVCaptureVideoPreviewLayer`
+- `--preview-compressed` — Shows a second window with the compressed output via `VTCompressionSession` + `AVSampleBufferDisplayLayer`, useful for evaluating compression artifacts at the current bitrate/codec settings
+- Both flags can be combined to show source and compressed side by side
+
+### CoreFoundation ctypes Bindings
+
+VTSession properties use CoreFoundation types directly via ctypes (`kCFBooleanTrue`/`kCFBooleanFalse`, `CFNumberCreate`) rather than PyObjC's `Foundation.NSNumber`, because PyObjC bridges NSNumber back to Python primitives which breaks `objc.pyobjc_id()`.
 
 ### Constraints
 

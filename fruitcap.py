@@ -1285,7 +1285,16 @@ def run_headless(recorder):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="macOS video/audio capture tool")
+    banner = (
+        "fruitcap.py\n"
+        "Copyright (c) 2026 Phil Jensen <philj@philandamy.org>\n"
+        "All rights reserved.\n"
+    )
+    print(banner)
+    parser = argparse.ArgumentParser(
+        description="macOS video/audio capture tool",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "--preview", action="store_true", help="Show a live preview window"
     )

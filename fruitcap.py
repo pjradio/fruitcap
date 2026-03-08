@@ -216,6 +216,9 @@ class Recorder:
         self.lock = threading.Lock()
         self.started_writing = threading.Event()
         self.compressed_preview = None
+        self.max_frames = None
+        self.max_seconds = None
+        self._stop_callback = None
 
     def find_device(self):
         devices = AVF.AVCaptureDevice.devicesWithMediaType_(AVF.AVMediaTypeVideo)
@@ -464,6 +467,8 @@ class Recorder:
                     if self.compressed_preview:
                         self.compressed_preview.encode_frame(sample_buffer)
                     self._update_status()
+                    if self.max_frames and self.frames_written >= self.max_frames:
+                        self._trigger_stop()
 
     def handle_audio_sample_buffer(self, sample_buffer):
         if not self.running or not self.audio_writer_input:
@@ -508,6 +513,29 @@ class Recorder:
             f"size: {size_str}{dropped}   "
         )
         sys.stdout.flush()
+
+    def _trigger_stop(self):
+        if not self.running:
+            return
+        if self._stop_callback:
+            self._stop_callback()
+        else:
+            self.stop()
+
+    def start_time_limit(self):
+        """Start a timer that stops recording after max_seconds."""
+        if not self.max_seconds:
+            return
+
+        def _timer():
+            self.started_writing.wait()
+            remaining = self.max_seconds - (time.monotonic() - self.start_time)
+            if remaining > 0:
+                time.sleep(remaining)
+            self._trigger_stop()
+
+        t = threading.Thread(target=_timer, daemon=True)
+        t.start()
 
 
 class CompressedPreview:
@@ -777,7 +805,23 @@ def main():
         "--preview-compressed", action="store_true",
         help="Show a live preview of the compressor output",
     )
+    parser.add_argument(
+        "-p", "--preview-both", action="store_true",
+        help="Show both source and compressed preview windows",
+    )
+    parser.add_argument(
+        "--time", type=float, metavar="SECONDS",
+        help="Stop recording after the specified number of seconds",
+    )
+    parser.add_argument(
+        "--frames", type=int, metavar="N",
+        help="Stop recording after capturing N frames",
+    )
     args = parser.parse_args()
+
+    if args.preview_both:
+        args.preview = True
+        args.preview_compressed = True
 
     cfg = load_config()
     check_camera_permission()
@@ -798,14 +842,29 @@ def main():
         else:
             print("Warning: Compressed preview unavailable, continuing without it.")
 
+    if args.frames:
+        recorder.max_frames = args.frames
+    if args.time:
+        recorder.max_seconds = args.time
+
     recorder.start()
 
     if args.preview or args.preview_compressed:
+        import AppKit
+        # For preview mode, stop callback terminates the NSApp run loop on the main thread
+        def _stop_app():
+            app = AppKit.NSApplication.sharedApplication()
+            app.performSelectorOnMainThread_withObject_waitUntilDone_(
+                objc.selector(app.terminate_, signature=b"v@:@"), None, False
+            )
+        recorder._stop_callback = _stop_app
+        recorder.start_time_limit()
         run_with_preview(recorder, show_source=args.preview,
                          show_compressed=args.preview_compressed)
     else:
+        recorder.start_time_limit()
         try:
-            while True:
+            while recorder.running:
                 line = input()
                 if line.strip().lower() == "q":
                     break

@@ -7,6 +7,7 @@ import ctypes.util
 import os
 import sys
 import threading
+import time
 
 import AVFoundation as AVF
 import CoreMedia
@@ -60,6 +61,7 @@ class Recorder:
         self.writer_input = None
         self.running = False
         self.frames_written = 0
+        self.start_time = None
         self.lock = threading.Lock()
         self.started_writing = threading.Event()
 
@@ -194,11 +196,41 @@ class Recorder:
                 )
                 if not self.started_writing.is_set():
                     self.writer.startSessionAtSourceTime_(timestamp)
+                    self.start_time = time.monotonic()
                     self.started_writing.set()
 
                 if self.writer_input.isReadyForMoreMediaData():
                     self.writer_input.appendSampleBuffer_(sample_buffer)
                     self.frames_written += 1
+                    self._update_status()
+
+
+    def _update_status(self):
+        elapsed = time.monotonic() - self.start_time
+        minutes, seconds = divmod(int(elapsed), 60)
+        hours, minutes = divmod(minutes, 60)
+
+        output_path = self.cfg["output"]
+        try:
+            size_bytes = os.path.getsize(output_path)
+        except OSError:
+            size_bytes = 0
+
+        if size_bytes >= 1_073_741_824:
+            size_str = f"{size_bytes / 1_073_741_824:.2f} GB"
+        elif size_bytes >= 1_048_576:
+            size_str = f"{size_bytes / 1_048_576:.1f} MB"
+        elif size_bytes >= 1024:
+            size_str = f"{size_bytes / 1024:.1f} KB"
+        else:
+            size_str = f"{size_bytes} B"
+
+        sys.stdout.write(
+            f"\r  {hours:02d}:{minutes:02d}:{seconds:02d}  "
+            f"frames: {self.frames_written}  "
+            f"size: {size_str}   "
+        )
+        sys.stdout.flush()
 
 
 def check_camera_permission():

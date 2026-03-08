@@ -219,6 +219,7 @@ class Recorder:
         self.max_frames = None
         self.max_seconds = None
         self._stop_callback = None
+        self._start_timestamp = None
 
     def find_device(self):
         devices = AVF.AVCaptureDevice.devicesWithMediaType_(AVF.AVMediaTypeVideo)
@@ -425,6 +426,8 @@ class Recorder:
         print("Press 'q' then Enter to stop recording.")
 
     def stop(self):
+        if not self.running:
+            return
         self.running = False
         if self.compressed_preview:
             self.compressed_preview.invalidate()
@@ -459,6 +462,7 @@ class Recorder:
                 if not self.started_writing.is_set():
                     self.writer.startSessionAtSourceTime_(timestamp)
                     self.start_time = time.monotonic()
+                    self._start_timestamp = timestamp
                     self.started_writing.set()
 
                 if self.writer_input.isReadyForMoreMediaData():
@@ -469,6 +473,12 @@ class Recorder:
                     self._update_status()
                     if self.max_frames and self.frames_written >= self.max_frames:
                         self._trigger_stop()
+                    elif self.max_seconds:
+                        elapsed = CoreMedia.CMTimeGetSeconds(
+                            CoreMedia.CMTimeSubtract(timestamp, self._start_timestamp)
+                        )
+                        if elapsed >= self.max_seconds:
+                            self._trigger_stop()
 
     def handle_audio_sample_buffer(self, sample_buffer):
         if not self.running or not self.audio_writer_input:
@@ -522,20 +532,6 @@ class Recorder:
         else:
             self.stop()
 
-    def start_time_limit(self):
-        """Start a timer that stops recording after max_seconds."""
-        if not self.max_seconds:
-            return
-
-        def _timer():
-            self.started_writing.wait()
-            remaining = self.max_seconds - (time.monotonic() - self.start_time)
-            if remaining > 0:
-                time.sleep(remaining)
-            self._trigger_stop()
-
-        t = threading.Thread(target=_timer, daemon=True)
-        t.start()
 
 
 class CompressedPreview:
@@ -858,11 +854,9 @@ def main():
                 objc.selector(app.terminate_, signature=b"v@:@"), None, False
             )
         recorder._stop_callback = _stop_app
-        recorder.start_time_limit()
         run_with_preview(recorder, show_source=args.preview,
                          show_compressed=args.preview_compressed)
     else:
-        recorder.start_time_limit()
         try:
             while recorder.running:
                 line = input()

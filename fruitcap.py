@@ -165,7 +165,10 @@ class Recorder:
     def setup_session(self, device, audio_device=None):
         self.session = AVF.AVCaptureSession.alloc().init()
         # No session preset — allow the device to deliver its native format
-        self.session.setSessionPreset_(AVF.AVCaptureSessionPresetInputPriority)
+        if self.session.canSetSessionPreset_(AVF.AVCaptureSessionPresetInputPriority):
+            self.session.setSessionPreset_(AVF.AVCaptureSessionPresetInputPriority)
+        else:
+            print("Warning: InputPriority preset not supported, using default preset")
 
         # Add video device input
         dev_input, error = AVF.AVCaptureDeviceInput.deviceInputWithDevice_error_(device, None)
@@ -258,8 +261,18 @@ class Recorder:
 
         if self.cfg["codec"] == "h265":
             codec_type = AVF.AVVideoCodecTypeHEVC
+            # Select HEVC profile based on bit depth and chroma subsampling
+            bit_depth = self.cfg["bit_depth"]
+            chroma = self.cfg["chroma"]
+            if chroma == "422":
+                hevc_profile = "HEVC_Main42210_AutoLevel"
+            elif bit_depth == 10:
+                hevc_profile = "HEVC_Main10_AutoLevel"
+            else:
+                hevc_profile = "HEVC_Main_AutoLevel"
             compression_settings = {
                 AVF.AVVideoAverageBitRateKey: bitrate,
+                AVF.AVVideoProfileLevelKey: hevc_profile,
             }
         else:
             codec_type = AVF.AVVideoCodecTypeH264

@@ -148,6 +148,18 @@ def load_config(path="fruitcap.cfg"):
         print(f"Error: Unsupported chroma '{chroma}'. Use '420' or '422'.")
         sys.exit(1)
 
+    fps = config.get("capture", "fps", fallback="").strip()
+    if fps:
+        try:
+            fps = float(fps)
+            if fps <= 0:
+                raise ValueError
+        except ValueError:
+            print(f"Error: Invalid fps '{config.get('capture', 'fps')}'. Use a positive number (e.g., 29.97, 30, 24).")
+            sys.exit(1)
+    else:
+        fps = None
+
     discard_late = config.getboolean("capture", "discard_late_frames", fallback=False)
 
     # Audio config
@@ -163,6 +175,7 @@ def load_config(path="fruitcap.cfg"):
         "codec": codec,
         "bit_depth": bit_depth,
         "chroma": chroma,
+        "fps": fps,
         "discard_late_frames": discard_late,
         "bitrate": config.getint("capture", "bitrate", fallback=150000000),
         "output": config.get("capture", "output", fallback="capture.mp4"),
@@ -245,7 +258,7 @@ class Recorder:
         if self.session.canSetSessionPreset_(AVF.AVCaptureSessionPresetInputPriority):
             self.session.setSessionPreset_(AVF.AVCaptureSessionPresetInputPriority)
         else:
-            print("Warning: InputPriority preset not supported, using default preset")
+            pass  # Device doesn't support InputPriority; default preset works fine
 
         # Add video device input
         dev_input, error = AVF.AVCaptureDeviceInput.deviceInputWithDevice_error_(device, None)
@@ -258,6 +271,22 @@ class Recorder:
         else:
             print("Error: Could not add device input to session.")
             sys.exit(1)
+
+        # Set frame rate if configured
+        if self.cfg["fps"]:
+            fps = self.cfg["fps"]
+            # Use integer timescale for clean framerates, high timescale for fractional
+            if fps == int(fps):
+                duration = CoreMedia.CMTimeMake(1, int(fps))
+            else:
+                duration = CoreMedia.CMTimeMake(1001, round(fps * 1001))
+            success, error = device.lockForConfiguration_(None)
+            if success:
+                device.setActiveVideoMinFrameDuration_(duration)
+                device.setActiveVideoMaxFrameDuration_(duration)
+                device.unlockForConfiguration()
+            else:
+                print(f"Warning: Could not set frame rate: {error}")
 
         # Set up delegate
         self._delegate = SampleBufferDelegate.alloc().init()
@@ -421,7 +450,9 @@ class Recorder:
             f"Recording to {self.cfg['output']} "
             f"({self.cfg['width']}x{self.cfg['height']}, "
             f"{codec_label}, {self.cfg['bit_depth']}-bit {self.cfg['chroma']}, "
-            f"{self.cfg['bitrate'] / 1_000_000:.1f} Mbps{audio_label})"
+            f"{self.cfg['bitrate'] / 1_000_000:.1f} Mbps"
+            f"{f', {self.cfg[\"fps\"]:g}fps' if self.cfg['fps'] else ''}"
+            f"{audio_label})"
         )
         print("Press 'q' then Enter to stop recording.")
 

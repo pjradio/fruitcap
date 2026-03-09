@@ -1516,6 +1516,7 @@ def check_microphone_permission():
         print("Warning: Microphone access is denied. Recording without audio.")
         print("Grant access in System Settings > Privacy & Security > Microphone.")
         return False
+    return False
 
 
 def check_camera_permission():

@@ -589,3 +589,57 @@ class TestSegmentPath:
         r.split_seconds = 60
         assert r._output_path_for_segment(1) == "test_001.mp4"
         assert r._output_path_for_segment(2) == "test_002.mp4"
+
+
+# ── Audio-only mode ──
+
+class TestAudioOnly:
+    def _write_cfg(self, content="[capture]\n[audio]\n"):
+        f = tempfile.NamedTemporaryFile(mode="w", suffix=".cfg", delete=False)
+        f.write(content)
+        f.flush()
+        f.close()
+        return f.name
+
+    def test_audio_only_flag_in_config(self):
+        path = self._write_cfg()
+        cfg = fruitcap.load_config(path, overrides={"audio_only": True})
+        os.unlink(path)
+        assert cfg["audio_only"] is True
+
+    def test_audio_only_default_false(self):
+        path = self._write_cfg()
+        cfg = fruitcap.load_config(path)
+        os.unlink(path)
+        assert cfg["audio_only"] is False
+
+    def test_audio_only_with_aac(self):
+        path = self._write_cfg("[capture]\n[audio]\ncodec = aac\n")
+        cfg = fruitcap.load_config(path, overrides={"audio_only": True})
+        os.unlink(path)
+        assert cfg["audio_only"] is True
+        assert cfg["audio_codec"] == "aac"
+
+    def test_audio_only_with_alac(self):
+        path = self._write_cfg("[capture]\n[audio]\ncodec = alac\n")
+        cfg = fruitcap.load_config(path, overrides={"audio_only": True})
+        os.unlink(path)
+        assert cfg["audio_codec"] == "alac"
+
+    def test_audio_only_with_pcm(self):
+        path = self._write_cfg("[capture]\n[audio]\ncodec = pcm\n")
+        cfg = fruitcap.load_config(path, overrides={"audio_only": True})
+        os.unlink(path)
+        assert cfg["audio_codec"] == "pcm"
+
+    def test_audio_only_sample_rate_override(self):
+        path = self._write_cfg("[capture]\n[audio]\n")
+        cfg = fruitcap.load_config(path, overrides={"audio_only": True, "audio_sample_rate": "96000"})
+        os.unlink(path)
+        assert cfg["audio_sample_rate"] == 96000
+
+    def test_audio_only_channels_override(self):
+        path = self._write_cfg("[capture]\n[audio]\n")
+        cfg = fruitcap.load_config(path, overrides={"audio_only": True, "audio_channels": "1"})
+        os.unlink(path)
+        assert cfg["audio_channels"] == 1

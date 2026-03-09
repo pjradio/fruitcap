@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""fruitcap - macOS video capture to H.264 using AVFoundation hardware encoder.
+"""fruitcap - macOS video/audio capture using AVFoundation hardware encoder.
 
 Author: Phil Jensen <philj@philandamy.org>
 """
@@ -298,7 +298,10 @@ def load_config(path="fruitcap.cfg", overrides=None):
         print(f"Error: Invalid audio bitrate '{audio_bitrate_str}'. Use a number or shorthand like '256k'.")
         sys.exit(1)
 
+    audio_only = overrides.get("audio_only", False) if overrides else False
+
     return {
+        "audio_only": audio_only,
         "width": width,
         "height": height,
         "codec": codec,
@@ -584,73 +587,73 @@ class Recorder:
         log(f"Using audio device: {device.localizedName()}")
         return device
 
-    def setup_session(self, device, audio_device=None):
+    def setup_session(self, device=None, audio_device=None):
         self.session = AVF.AVCaptureSession.alloc().init()
-        # No session preset — allow the device to deliver its native format
-        if self.session.canSetSessionPreset_(AVF.AVCaptureSessionPresetInputPriority):
-            self.session.setSessionPreset_(AVF.AVCaptureSessionPresetInputPriority)
-        else:
-            pass  # Device doesn't support InputPriority; default preset works fine
-
-        # Add video device input
-        dev_input, error = AVF.AVCaptureDeviceInput.deviceInputWithDevice_error_(device, None)
-        if dev_input is None:
-            print(f"Error: Could not create device input: {error}")
-            sys.exit(1)
-
-        if self.session.canAddInput_(dev_input):
-            self.session.addInput_(dev_input)
-        else:
-            print("Error: Could not add device input to session.")
-            sys.exit(1)
-
-        # Set frame rate if configured
-        if self.cfg["fps"]:
-            fps = self.cfg["fps"]
-            # Use integer timescale for clean framerates, high timescale for fractional
-            if fps == int(fps):
-                duration = CoreMedia.CMTimeMake(1, int(fps))
-            else:
-                duration = CoreMedia.CMTimeMake(1001, round(fps * 1001))
-            success, error = device.lockForConfiguration_(None)
-            if success:
-                device.setActiveVideoMinFrameDuration_(duration)
-                device.setActiveVideoMaxFrameDuration_(duration)
-                device.unlockForConfiguration()
-            else:
-                print(f"Warning: Could not set frame rate: {error}")
 
         # Set up delegate
         self._delegate = SampleBufferDelegate.alloc().init()
         self._delegate.recorder = self
 
-        # Add video data output
-        video_output = AVF.AVCaptureVideoDataOutput.alloc().init()
-        video_output.setAlwaysDiscardsLateVideoFrames_(self.cfg["discard_late_frames"])
+        if device:
+            # No session preset — allow the device to deliver its native format
+            if self.session.canSetSessionPreset_(AVF.AVCaptureSessionPresetInputPriority):
+                self.session.setSessionPreset_(AVF.AVCaptureSessionPresetInputPriority)
 
-        pixel_formats = {
-            ("420", 8): Quartz.kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-            ("420", 10): Quartz.kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
-            ("422", 8): Quartz.kCVPixelFormatType_422YpCbCr8BiPlanarVideoRange,
-            ("422", 10): Quartz.kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange,
-        }
-        pixel_format = pixel_formats[(self.cfg["chroma"], self.cfg["bit_depth"])]
+            # Add video device input
+            dev_input, error = AVF.AVCaptureDeviceInput.deviceInputWithDevice_error_(device, None)
+            if dev_input is None:
+                print(f"Error: Could not create device input: {error}")
+                sys.exit(1)
 
-        video_settings = {
-            str(Quartz.kCVPixelBufferPixelFormatTypeKey): int(pixel_format),
-        }
-        video_output.setVideoSettings_(video_settings)
+            if self.session.canAddInput_(dev_input):
+                self.session.addInput_(dev_input)
+            else:
+                print("Error: Could not add device input to session.")
+                sys.exit(1)
 
-        video_queue = dispatch_queue_create(b"fruitcap.videoQueue")
-        video_queue_obj = objc.objc_object(c_void_p=video_queue)
-        self._delegate.video_output = video_output
-        video_output.setSampleBufferDelegate_queue_(self._delegate, video_queue_obj)
+            # Set frame rate if configured
+            if self.cfg["fps"]:
+                fps = self.cfg["fps"]
+                # Use integer timescale for clean framerates, high timescale for fractional
+                if fps == int(fps):
+                    duration = CoreMedia.CMTimeMake(1, int(fps))
+                else:
+                    duration = CoreMedia.CMTimeMake(1001, round(fps * 1001))
+                success, error = device.lockForConfiguration_(None)
+                if success:
+                    device.setActiveVideoMinFrameDuration_(duration)
+                    device.setActiveVideoMaxFrameDuration_(duration)
+                    device.unlockForConfiguration()
+                else:
+                    print(f"Warning: Could not set frame rate: {error}")
 
-        if self.session.canAddOutput_(video_output):
-            self.session.addOutput_(video_output)
-        else:
-            print("Error: Could not add video output to session.")
-            sys.exit(1)
+            # Add video data output
+            video_output = AVF.AVCaptureVideoDataOutput.alloc().init()
+            video_output.setAlwaysDiscardsLateVideoFrames_(self.cfg["discard_late_frames"])
+
+            pixel_formats = {
+                ("420", 8): Quartz.kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                ("420", 10): Quartz.kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+                ("422", 8): Quartz.kCVPixelFormatType_422YpCbCr8BiPlanarVideoRange,
+                ("422", 10): Quartz.kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange,
+            }
+            pixel_format = pixel_formats[(self.cfg["chroma"], self.cfg["bit_depth"])]
+
+            video_settings = {
+                str(Quartz.kCVPixelBufferPixelFormatTypeKey): int(pixel_format),
+            }
+            video_output.setVideoSettings_(video_settings)
+
+            video_queue = dispatch_queue_create(b"fruitcap.videoQueue")
+            video_queue_obj = objc.objc_object(c_void_p=video_queue)
+            self._delegate.video_output = video_output
+            video_output.setSampleBufferDelegate_queue_(self._delegate, video_queue_obj)
+
+            if self.session.canAddOutput_(video_output):
+                self.session.addOutput_(video_output)
+            else:
+                print("Error: Could not add video output to session.")
+                sys.exit(1)
 
         # Add audio input and output
         if audio_device:
@@ -682,63 +685,68 @@ class Recorder:
         if hasattr(self, "_cached_output_settings"):
             return self._cached_output_settings
 
-        width = self.cfg["width"]
-        height = self.cfg["height"]
-        bitrate = self.cfg["bitrate"]
-        codec = self.cfg["codec"]
+        video_settings = None
+        if not self.cfg["audio_only"]:
+            width = self.cfg["width"]
+            height = self.cfg["height"]
+            bitrate = self.cfg["bitrate"]
+            codec = self.cfg["codec"]
 
-        prores_codec_map = {
-            "prores_proxy": AVF.AVVideoCodecTypeAppleProRes422Proxy,
-            "prores_lt": AVF.AVVideoCodecTypeAppleProRes422LT,
-            "prores": AVF.AVVideoCodecTypeAppleProRes422,
-            "prores_hq": AVF.AVVideoCodecTypeAppleProRes422HQ,
-        }
+            prores_codec_map = {
+                "prores_proxy": AVF.AVVideoCodecTypeAppleProRes422Proxy,
+                "prores_lt": AVF.AVVideoCodecTypeAppleProRes422LT,
+                "prores": AVF.AVVideoCodecTypeAppleProRes422,
+                "prores_hq": AVF.AVVideoCodecTypeAppleProRes422HQ,
+            }
 
-        if codec in prores_codec_map:
-            codec_type = prores_codec_map[codec]
-            compression_settings = {}
-        elif codec == "h265":
-            codec_type = AVF.AVVideoCodecTypeHEVC
-            bit_depth = self.cfg["bit_depth"]
-            chroma = self.cfg["chroma"]
-            if chroma == "422":
-                hevc_profile = "HEVC_Main42210_AutoLevel"
-            elif bit_depth == 10:
-                hevc_profile = "HEVC_Main10_AutoLevel"
+            if codec in prores_codec_map:
+                codec_type = prores_codec_map[codec]
+                compression_settings = {}
+            elif codec == "h265":
+                codec_type = AVF.AVVideoCodecTypeHEVC
+                bit_depth = self.cfg["bit_depth"]
+                chroma = self.cfg["chroma"]
+                if chroma == "422":
+                    hevc_profile = "HEVC_Main42210_AutoLevel"
+                elif bit_depth == 10:
+                    hevc_profile = "HEVC_Main10_AutoLevel"
+                else:
+                    hevc_profile = "HEVC_Main_AutoLevel"
+                compression_settings = {
+                    AVF.AVVideoAverageBitRateKey: bitrate,
+                    AVF.AVVideoProfileLevelKey: hevc_profile,
+                }
             else:
-                hevc_profile = "HEVC_Main_AutoLevel"
-            compression_settings = {
-                AVF.AVVideoAverageBitRateKey: bitrate,
-                AVF.AVVideoProfileLevelKey: hevc_profile,
-            }
-        else:
-            codec_type = AVF.AVVideoCodecTypeH264
-            compression_settings = {
-                AVF.AVVideoAverageBitRateKey: bitrate,
-                AVF.AVVideoProfileLevelKey: AVF.AVVideoProfileLevelH264HighAutoLevel,
+                codec_type = AVF.AVVideoCodecTypeH264
+                compression_settings = {
+                    AVF.AVVideoAverageBitRateKey: bitrate,
+                    AVF.AVVideoProfileLevelKey: AVF.AVVideoProfileLevelH264HighAutoLevel,
+                }
+
+            cs = COLOR_SPACE_PRESETS[self.cfg["color_space"]]
+            primaries_key = f"AVVideoColorPrimaries_{cs['primaries']}"
+            transfer_key = f"AVVideoTransferFunction_{cs['transfer']}"
+            matrix_key = f"AVVideoYCbCrMatrix_{cs['matrix']}"
+            color_properties = {
+                AVF.AVVideoColorPrimariesKey: getattr(AVF, primaries_key),
+                AVF.AVVideoTransferFunctionKey: getattr(AVF, transfer_key),
+                AVF.AVVideoYCbCrMatrixKey: getattr(AVF, matrix_key),
             }
 
-        cs = COLOR_SPACE_PRESETS[self.cfg["color_space"]]
-        primaries_key = f"AVVideoColorPrimaries_{cs['primaries']}"
-        transfer_key = f"AVVideoTransferFunction_{cs['transfer']}"
-        matrix_key = f"AVVideoYCbCrMatrix_{cs['matrix']}"
-        color_properties = {
-            AVF.AVVideoColorPrimariesKey: getattr(AVF, primaries_key),
-            AVF.AVVideoTransferFunctionKey: getattr(AVF, transfer_key),
-            AVF.AVVideoYCbCrMatrixKey: getattr(AVF, matrix_key),
-        }
-
-        video_settings = {
-            AVF.AVVideoCodecKey: codec_type,
-            AVF.AVVideoWidthKey: width,
-            AVF.AVVideoHeightKey: height,
-            AVF.AVVideoColorPropertiesKey: color_properties,
-        }
-        if compression_settings:
-            video_settings[AVF.AVVideoCompressionPropertiesKey] = compression_settings
+            video_settings = {
+                AVF.AVVideoCodecKey: codec_type,
+                AVF.AVVideoWidthKey: width,
+                AVF.AVVideoHeightKey: height,
+                AVF.AVVideoColorPropertiesKey: color_properties,
+            }
+            if compression_settings:
+                video_settings[AVF.AVVideoCompressionPropertiesKey] = compression_settings
 
         audio_settings = None
-        if self.cfg["audio_enabled"] and self._delegate.audio_output is not None:
+        audio_active = self.cfg["audio_only"] or (
+            self.cfg["audio_enabled"] and self._delegate.audio_output is not None
+        )
+        if audio_active:
             if self.cfg["audio_codec"] == "pcm":
                 audio_settings = {
                     AVF.AVFormatIDKey: kAudioFormatLinearPCM,
@@ -775,7 +783,12 @@ class Recorder:
         output_url = Foundation.NSURL.fileURLWithPath_(
             os.path.abspath(output_path)
         )
-        file_type = AVF.AVFileTypeQuickTimeMovie if self.cfg["container"] == "mov" else AVF.AVFileTypeMPEG4
+        if self.cfg["audio_only"]:
+            file_type = AVF.AVFileTypeAppleM4A
+        elif self.cfg["container"] == "mov":
+            file_type = AVF.AVFileTypeQuickTimeMovie
+        else:
+            file_type = AVF.AVFileTypeMPEG4
         writer, error = AVF.AVAssetWriter.alloc().initWithURL_fileType_error_(
             output_url, file_type, None
         )
@@ -785,15 +798,17 @@ class Recorder:
 
         video_settings, audio_settings = self._get_output_settings()
 
-        writer_input = AVF.AVAssetWriterInput.assetWriterInputWithMediaType_outputSettings_(
-            AVF.AVMediaTypeVideo, video_settings
-        )
-        writer_input.setExpectsMediaDataInRealTime_(True)
-        if writer.canAddInput_(writer_input):
-            writer.addInput_(writer_input)
-        else:
-            print("Error: Could not add video writer input.")
-            sys.exit(1)
+        writer_input = None
+        if video_settings:
+            writer_input = AVF.AVAssetWriterInput.assetWriterInputWithMediaType_outputSettings_(
+                AVF.AVMediaTypeVideo, video_settings
+            )
+            writer_input.setExpectsMediaDataInRealTime_(True)
+            if writer.canAddInput_(writer_input):
+                writer.addInput_(writer_input)
+            else:
+                print("Error: Could not add video writer input.")
+                sys.exit(1)
 
         audio_writer_input = None
         if audio_settings:
@@ -812,7 +827,8 @@ class Recorder:
     def _finalize_writer(self):
         """Finalize the current writer synchronously."""
         if self.writer and self.writer.status() == AVF.AVAssetWriterStatusWriting:
-            self.writer_input.markAsFinished()
+            if self.writer_input:
+                self.writer_input.markAsFinished()
             if self.audio_writer_input:
                 self.audio_writer_input.markAsFinished()
             done = threading.Event()
@@ -848,30 +864,44 @@ class Recorder:
         self.running = True
         self.writer.startWriting()
         self.session.startRunning()
-        codec_labels = {
-            "h264": "H.264", "h265": "H.265/HEVC",
-            "prores": "ProRes 422", "prores_proxy": "ProRes 422 Proxy",
-            "prores_lt": "ProRes 422 LT", "prores_hq": "ProRes 422 HQ",
-        }
-        codec_label = codec_labels.get(self.cfg["codec"], self.cfg["codec"])
-        audio_label = ""
-        if self.audio_writer_input:
+        if self.cfg["audio_only"]:
             audio_codec_labels = {"alac": "ALAC", "pcm": "PCM", "aac": "AAC"}
             audio_codec = audio_codec_labels.get(self.cfg["audio_codec"], self.cfg["audio_codec"])
-            audio_label = (
-                f", audio: {audio_codec} "
+            bitrate_str = ""
+            if self.cfg["audio_codec"] == "aac":
+                bitrate_str = f", {self.cfg['audio_bitrate'] / 1000:.0f} kbps"
+            log(
+                f"Recording audio to {self.cfg['output']} "
+                f"({audio_codec} "
                 f"{self.cfg['audio_sample_rate'] // 1000}kHz/"
                 f"{self.cfg['audio_channels']}ch"
+                f"{bitrate_str})"
             )
-        bitrate_str = "" if self.cfg["codec"].startswith("prores") else f", {self.cfg['bitrate'] / 1_000_000:.1f} Mbps"
-        log(
-            f"Recording to {self.cfg['output']} "
-            f"({self.cfg['width']}x{self.cfg['height']}, "
-            f"{codec_label}, {self.cfg['bit_depth']}-bit {self.cfg['chroma']}"
-            f"{bitrate_str}"
-            + (f", {self.cfg['fps']:g}fps" if self.cfg['fps'] else "")
-            + f"{audio_label})"
-        )
+        else:
+            codec_labels = {
+                "h264": "H.264", "h265": "H.265/HEVC",
+                "prores": "ProRes 422", "prores_proxy": "ProRes 422 Proxy",
+                "prores_lt": "ProRes 422 LT", "prores_hq": "ProRes 422 HQ",
+            }
+            codec_label = codec_labels.get(self.cfg["codec"], self.cfg["codec"])
+            audio_label = ""
+            if self.audio_writer_input:
+                audio_codec_labels = {"alac": "ALAC", "pcm": "PCM", "aac": "AAC"}
+                audio_codec = audio_codec_labels.get(self.cfg["audio_codec"], self.cfg["audio_codec"])
+                audio_label = (
+                    f", audio: {audio_codec} "
+                    f"{self.cfg['audio_sample_rate'] // 1000}kHz/"
+                    f"{self.cfg['audio_channels']}ch"
+                )
+            bitrate_str = "" if self.cfg["codec"].startswith("prores") else f", {self.cfg['bitrate'] / 1_000_000:.1f} Mbps"
+            log(
+                f"Recording to {self.cfg['output']} "
+                f"({self.cfg['width']}x{self.cfg['height']}, "
+                f"{codec_label}, {self.cfg['bit_depth']}-bit {self.cfg['chroma']}"
+                f"{bitrate_str}"
+                + (f", {self.cfg['fps']:g}fps" if self.cfg['fps'] else "")
+                + f"{audio_label})"
+            )
         log("Press 'q' then Enter to stop recording.")
 
     def stop(self):
@@ -883,17 +913,26 @@ class Recorder:
         self.session.stopRunning()
         self._finalize_writer()
 
-        dropped_msg = f", {self.frames_dropped} dropped" if self.frames_dropped else ""
-        if self._splitting_enabled() and self._segment_num > 1:
-            log(
-                f"\nRecording stopped. {self.frames_written} frames written"
-                f"{dropped_msg} across {self._segment_num} segments"
-            )
+        if self.cfg["audio_only"]:
+            elapsed = time.monotonic() - self.start_time if self.start_time else 0
+            minutes, seconds = divmod(int(elapsed), 60)
+            hours, minutes = divmod(minutes, 60)
+            if self._splitting_enabled() and self._segment_num > 1:
+                log(f"\nRecording stopped. {hours:02d}:{minutes:02d}:{seconds:02d} across {self._segment_num} segments")
+            else:
+                log(f"\nRecording stopped. {hours:02d}:{minutes:02d}:{seconds:02d} to {self.cfg['output']}")
         else:
-            log(
-                f"\nRecording stopped. {self.frames_written} frames written"
-                f"{dropped_msg} to {self.cfg['output']}"
-            )
+            dropped_msg = f", {self.frames_dropped} dropped" if self.frames_dropped else ""
+            if self._splitting_enabled() and self._segment_num > 1:
+                log(
+                    f"\nRecording stopped. {self.frames_written} frames written"
+                    f"{dropped_msg} across {self._segment_num} segments"
+                )
+            else:
+                log(
+                    f"\nRecording stopped. {self.frames_written} frames written"
+                    f"{dropped_msg} to {self.cfg['output']}"
+                )
 
     def handle_video_sample_buffer(self, sample_buffer):
         if not self.running:
@@ -959,12 +998,64 @@ class Recorder:
             return
 
         with self.lock:
-            if (
-                self.writer.status() == AVF.AVAssetWriterStatusWriting
-                and self.started_writing.is_set()
-                and self.audio_writer_input.isReadyForMoreMediaData()
-            ):
-                self.audio_writer_input.appendSampleBuffer_(sample_buffer)
+            if self.writer.status() == AVF.AVAssetWriterStatusWriting:
+                # In audio-only mode, start the session from the first audio buffer
+                if self.cfg["audio_only"] and not self.started_writing.is_set():
+                    timestamp = CoreMedia.CMSampleBufferGetPresentationTimeStamp(
+                        sample_buffer
+                    )
+                    self.writer.startSessionAtSourceTime_(timestamp)
+                    self.start_time = time.monotonic()
+                    self._start_timestamp = timestamp
+                    self._segment_start_timestamp = timestamp
+                    self.started_writing.set()
+
+                if (
+                    self.started_writing.is_set()
+                    and self.audio_writer_input.isReadyForMoreMediaData()
+                ):
+                    self.audio_writer_input.appendSampleBuffer_(sample_buffer)
+
+                    if self.cfg["audio_only"]:
+                        self._update_audio_status()
+
+                        # Check time limit
+                        if self.max_seconds:
+                            timestamp = CoreMedia.CMSampleBufferGetPresentationTimeStamp(
+                                sample_buffer
+                            )
+                            elapsed = CoreMedia.CMTimeGetSeconds(
+                                CoreMedia.CMTimeSubtract(timestamp, self._start_timestamp)
+                            )
+                            if elapsed >= self.max_seconds:
+                                self._trigger_stop()
+
+                        # Check segment split conditions
+                        if self._splitting_enabled():
+                            need_split = False
+                            if self.split_seconds:
+                                timestamp = CoreMedia.CMSampleBufferGetPresentationTimeStamp(
+                                    sample_buffer
+                                )
+                                seg_elapsed = CoreMedia.CMTimeGetSeconds(
+                                    CoreMedia.CMTimeSubtract(timestamp, self._segment_start_timestamp)
+                                )
+                                if seg_elapsed >= self.split_seconds:
+                                    need_split = True
+                            if self.split_size_bytes:
+                                try:
+                                    cur_size = os.path.getsize(
+                                        self._output_path_for_segment(self._segment_num)
+                                    )
+                                    if cur_size >= self.split_size_bytes:
+                                        need_split = True
+                                except OSError:
+                                    pass
+                            if need_split:
+                                timestamp = CoreMedia.CMSampleBufferGetPresentationTimeStamp(
+                                    sample_buffer
+                                )
+                                self._start_new_segment(timestamp)
 
 
     def _update_status(self):
@@ -994,6 +1085,34 @@ class Recorder:
             f"\r  {hours:02d}:{minutes:02d}:{seconds:02d}  "
             f"frames: {self.frames_written}  "
             f"size: {size_str}{dropped}   "
+        )
+        sys.stdout.flush()
+
+    def _update_audio_status(self):
+        if _quiet:
+            return
+        elapsed = time.monotonic() - self.start_time
+        minutes, seconds = divmod(int(elapsed), 60)
+        hours, minutes = divmod(minutes, 60)
+
+        output_path = self.cfg["output"]
+        try:
+            size_bytes = os.path.getsize(output_path)
+        except OSError:
+            size_bytes = 0
+
+        if size_bytes >= 1_073_741_824:
+            size_str = f"{size_bytes / 1_073_741_824:.2f} GB"
+        elif size_bytes >= 1_048_576:
+            size_str = f"{size_bytes / 1_048_576:.1f} MB"
+        elif size_bytes >= 1024:
+            size_str = f"{size_bytes / 1024:.1f} KB"
+        else:
+            size_str = f"{size_bytes} B"
+
+        sys.stdout.write(
+            f"\r  {hours:02d}:{minutes:02d}:{seconds:02d}  "
+            f"size: {size_str}   "
         )
         sys.stdout.flush()
 
@@ -1351,6 +1470,10 @@ def main():
         help="List supported formats for the selected video device and exit",
     )
     parser.add_argument(
+        "--audio-only", action="store_true",
+        help="Record audio only (no video capture)",
+    )
+    parser.add_argument(
         "-q", "--quiet", action="store_true",
         help="Suppress all output except errors and warnings",
     )
@@ -1373,6 +1496,8 @@ def main():
 
     # Build overrides dict from CLI args
     overrides = {}
+    if args.audio_only:
+        overrides["audio_only"] = True
     if args.codec:
         overrides["codec"] = args.codec
     if args.container:
@@ -1394,10 +1519,15 @@ def main():
 
     cfg = load_config(args.config, overrides=overrides or None)
 
-    # If user didn't explicitly set output, match extension to container
+    # If user didn't explicitly set output, match extension to container/mode
     if not args.output:
         base, ext = os.path.splitext(cfg["output"])
-        expected_ext = ".mov" if cfg["container"] == "mov" else ".mp4"
+        if cfg["audio_only"]:
+            expected_ext = ".m4a"
+        elif cfg["container"] == "mov":
+            expected_ext = ".mov"
+        else:
+            expected_ext = ".mp4"
         if ext.lower() != expected_ext:
             cfg["output"] = base + expected_ext
 
@@ -1427,26 +1557,45 @@ def main():
             print(line)
         sys.exit(0)
 
-    check_camera_permission()
-    if cfg["audio_enabled"]:
+    if cfg["audio_only"]:
+        # Audio-only mode: skip camera, require microphone
         if not check_microphone_permission():
-            cfg["audio_enabled"] = False
+            print("Error: Microphone access is required for audio-only recording.")
+            sys.exit(1)
+        cfg["audio_enabled"] = True
+        recorder = Recorder(cfg)
+        audio_device = recorder.find_audio_device(args.audio_device)
+        if not audio_device:
+            print("Error: No audio capture devices found.")
+            sys.exit(1)
+        recorder.setup_session(audio_device=audio_device)
+        recorder.setup_writer()
+        if args.frames:
+            print("Warning: --frames is ignored in audio-only mode.")
+        if args.preview or args.preview_compressed:
+            print("Warning: Preview modes are not available in audio-only mode.")
+    else:
+        check_camera_permission()
+        if cfg["audio_enabled"]:
+            if not check_microphone_permission():
+                cfg["audio_enabled"] = False
 
-    recorder = Recorder(cfg)
-    device = recorder.find_device(args.device)
-    audio_device = recorder.find_audio_device(args.audio_device) if cfg["audio_enabled"] else None
-    recorder.setup_session(device, audio_device)
-    recorder.setup_writer()
+        recorder = Recorder(cfg)
+        device = recorder.find_device(args.device)
+        audio_device = recorder.find_audio_device(args.audio_device) if cfg["audio_enabled"] else None
+        recorder.setup_session(device, audio_device)
+        recorder.setup_writer()
 
-    if args.preview_compressed:
-        cp = CompressedPreview(cfg)
-        if cp.setup():
-            recorder.compressed_preview = cp
-        else:
-            print("Warning: Compressed preview unavailable, continuing without it.")
+        if args.preview_compressed:
+            cp = CompressedPreview(cfg)
+            if cp.setup():
+                recorder.compressed_preview = cp
+            else:
+                print("Warning: Compressed preview unavailable, continuing without it.")
 
-    if args.frames:
-        recorder.max_frames = args.frames
+        if args.frames:
+            recorder.max_frames = args.frames
+
     if args.time:
         recorder.max_seconds = args.time
     if args.split_every:

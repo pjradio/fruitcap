@@ -9,6 +9,7 @@ import configparser
 import ctypes
 import ctypes.util
 import datetime
+import math
 import os
 import select
 import signal
@@ -81,6 +82,36 @@ _cm_lib.CMTimebaseSetTime.restype = ctypes.c_int32
 _cm_lib.CMTimebaseSetTime.argtypes = [ctypes.c_void_p, CMTimeStruct]
 _cm_lib.CMTimebaseSetRate.restype = ctypes.c_int32
 _cm_lib.CMTimebaseSetRate.argtypes = [ctypes.c_void_p, ctypes.c_double]
+
+# Audio level metering — read raw PCM from capture buffers
+_cm_lib.CMSampleBufferGetDataBuffer.restype = ctypes.c_void_p
+_cm_lib.CMSampleBufferGetDataBuffer.argtypes = [ctypes.c_void_p]
+_cm_lib.CMBlockBufferGetDataLength.restype = ctypes.c_size_t
+_cm_lib.CMBlockBufferGetDataLength.argtypes = [ctypes.c_void_p]
+_cm_lib.CMBlockBufferGetDataPointer.restype = ctypes.c_int32
+_cm_lib.CMBlockBufferGetDataPointer.argtypes = [
+    ctypes.c_void_p, ctypes.c_size_t,
+    ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t),
+    ctypes.POINTER(ctypes.c_void_p),
+]
+_cm_lib.CMSampleBufferGetFormatDescription.restype = ctypes.c_void_p
+_cm_lib.CMSampleBufferGetFormatDescription.argtypes = [ctypes.c_void_p]
+_cm_lib.CMAudioFormatDescriptionGetStreamBasicDescription.restype = ctypes.c_void_p
+_cm_lib.CMAudioFormatDescriptionGetStreamBasicDescription.argtypes = [ctypes.c_void_p]
+
+
+class AudioStreamBasicDescription(ctypes.Structure):
+    _fields_ = [
+        ("mSampleRate", ctypes.c_double),
+        ("mFormatID", ctypes.c_uint32),
+        ("mFormatFlags", ctypes.c_uint32),
+        ("mBytesPerPacket", ctypes.c_uint32),
+        ("mFramesPerPacket", ctypes.c_uint32),
+        ("mBytesPerFrame", ctypes.c_uint32),
+        ("mChannelsPerFrame", ctypes.c_uint32),
+        ("mBitsPerChannel", ctypes.c_uint32),
+        ("mReserved", ctypes.c_uint32),
+    ]
 
 
 def _vt_cfstr(name):
@@ -616,6 +647,15 @@ class Recorder:
         self._pending_finalizations = []
         self._writer_failure_lock = threading.Lock()
         self._writer_failure_reported = False
+        # VU meter
+        self._vu_enabled = False
+        self._vu_peak = 0.0
+        self._vu_clip_time = 0.0
+        self._vu_last_time = 0.0
+        self._vu_format_checked = False
+        self._vu_sample_ctype = None   # ctypes type for one sample
+        self._vu_bytes_per_sample = 0
+        self._vu_peak_divisor = 1.0    # normalizes integer samples to 0.0–1.0
 
     def find_device(self, selector=None):
         devices = get_devices(AVF.AVMediaTypeVideo)
@@ -1219,6 +1259,9 @@ class Recorder:
         if not CoreMedia.CMSampleBufferDataIsReady(sample_buffer):
             return
 
+        if self._vu_enabled:
+            self._measure_audio_peak(sample_buffer)
+
         stop_requested = False
         with self.lock:
             if not self.running or not self.writer or not self.audio_writer_input:
@@ -1317,6 +1360,79 @@ class Recorder:
             self._trigger_stop()
 
 
+    def _measure_audio_peak(self, sample_buffer):
+        """Extract peak audio level from a sample buffer and update VU state."""
+        buf_ptr = objc.pyobjc_id(sample_buffer)
+
+        # Detect sample format on first call
+        if not self._vu_format_checked:
+            self._vu_format_checked = True
+            fmt = _cm_lib.CMSampleBufferGetFormatDescription(buf_ptr)
+            if fmt:
+                asbd_ptr = _cm_lib.CMAudioFormatDescriptionGetStreamBasicDescription(fmt)
+                if asbd_ptr:
+                    asbd = AudioStreamBasicDescription.from_address(asbd_ptr)
+                    is_float = bool(asbd.mFormatFlags & 1)  # kAudioFormatFlagIsFloat
+                    bits = asbd.mBitsPerChannel
+                    if is_float and bits == 32:
+                        self._vu_sample_ctype = ctypes.c_float
+                        self._vu_bytes_per_sample = 4
+                        self._vu_peak_divisor = 1.0
+                    elif is_float and bits == 64:
+                        self._vu_sample_ctype = ctypes.c_double
+                        self._vu_bytes_per_sample = 8
+                        self._vu_peak_divisor = 1.0
+                    elif not is_float and bits == 16:
+                        self._vu_sample_ctype = ctypes.c_int16
+                        self._vu_bytes_per_sample = 2
+                        self._vu_peak_divisor = 32768.0
+                    elif not is_float and bits == 32:
+                        self._vu_sample_ctype = ctypes.c_int32
+                        self._vu_bytes_per_sample = 4
+                        self._vu_peak_divisor = 2147483648.0
+                    else:
+                        log(f"Warning: VU meter unsupported audio format "
+                            f"({'float' if is_float else 'int'} {bits}-bit); disabling.")
+                        self._vu_enabled = False
+                        return
+            if self._vu_sample_ctype is None:
+                # Could not read format description; assume float32
+                self._vu_sample_ctype = ctypes.c_float
+                self._vu_bytes_per_sample = 4
+                self._vu_peak_divisor = 1.0
+
+        block_buf = _cm_lib.CMSampleBufferGetDataBuffer(buf_ptr)
+        if not block_buf:
+            return
+        length = _cm_lib.CMBlockBufferGetDataLength(block_buf)
+        if length == 0:
+            return
+        data_out = ctypes.c_void_p()
+        err = _cm_lib.CMBlockBufferGetDataPointer(
+            block_buf, 0, None, None, ctypes.byref(data_out)
+        )
+        if err != 0 or not data_out.value:
+            return
+
+        num_samples = length // self._vu_bytes_per_sample
+        if num_samples == 0:
+            return
+        samples = (self._vu_sample_ctype * num_samples).from_address(data_out.value)
+        buf_peak = max((abs(s) for s in samples), default=0.0) / self._vu_peak_divisor
+
+        if buf_peak >= 1.0:
+            self._vu_clip_time = time.monotonic()
+
+        # Instant attack, exponential decay (~200ms time constant)
+        now = time.monotonic()
+        if buf_peak >= self._vu_peak:
+            self._vu_peak = buf_peak
+        elif self._vu_last_time > 0:
+            dt = now - self._vu_last_time
+            decay = math.exp(-dt / 0.2)
+            self._vu_peak = self._vu_peak * decay + buf_peak * (1.0 - decay)
+        self._vu_last_time = now
+
     def _update_status(self):
         if _quiet:
             return
@@ -1344,9 +1460,20 @@ class Recorder:
             dropped = f"  dropped: {self.frames_dropped}" if self.frames_dropped else ""
             detail = f"frames: {self.frames_written}  {dropped}"
 
+        vu_str = ""
+        if self._vu_enabled:
+            peak = self._vu_peak
+            db = 20.0 * math.log10(max(peak, 1e-6))
+            db = max(db, -48.0)
+            filled = round((db + 48.0) / 48.0 * 20)
+            filled = max(0, min(20, filled))
+            bar = "\u2588" * filled + "\u2591" * (20 - filled)
+            clip = " CLIP" if time.monotonic() - self._vu_clip_time < 2.0 else ""
+            vu_str = f"  \u2595{bar}\u258f{db:4.0f}dB{clip}"
+
         sys.stdout.write(
             f"\r  {hours:02d}:{minutes:02d}:{seconds:02d}  "
-            f"{detail}size: {size_str}   "
+            f"{detail}size: {size_str}{vu_str}   "
         )
         sys.stdout.flush()
 
@@ -1752,6 +1879,10 @@ def build_parser():
         help="Suppress all output except errors and warnings",
     )
     parser.add_argument(
+        "--vu", action="store_true",
+        help="Show a VU meter on the status line to monitor audio levels",
+    )
+    parser.add_argument(
         "--split-every", type=float, metavar="SECONDS",
         help="Split recording into segments of this duration",
     )
@@ -1911,6 +2042,12 @@ def main():
                 recorder.compressed_preview = cp
             else:
                 print("Warning: Compressed preview unavailable, continuing without it.")
+
+    if args.vu:
+        if cfg["audio_enabled"] or cfg["audio_only"]:
+            recorder._vu_enabled = True
+        else:
+            print("Warning: --vu requires audio capture; ignoring.")
 
     recorder.start()
 

@@ -904,10 +904,28 @@ class Recorder:
             )
         log("Press 'q' then Enter to stop recording.")
 
+        # Start a watchdog to detect missing input signal (video mode only)
+        if not self.cfg["audio_only"]:
+            self._signal_watchdog = threading.Timer(
+                5.0, self._check_signal_watchdog
+            )
+            self._signal_watchdog.daemon = True
+            self._signal_watchdog.start()
+
+    def _check_signal_watchdog(self):
+        if self.running and not self.started_writing.is_set():
+            print(
+                "\nError: No frames received from capture device. "
+                "Check that the input source is active and sending a signal."
+            )
+            self._trigger_stop()
+
     def stop(self):
         if not self.running:
             return
         self.running = False
+        if hasattr(self, "_signal_watchdog"):
+            self._signal_watchdog.cancel()
         if self.compressed_preview:
             self.compressed_preview.invalidate()
         self.session.stopRunning()

@@ -380,15 +380,22 @@ def generate_segment_path(base_path, segment_num):
     return f"{root}_{segment_num:03d}{ext}"
 
 
-def generate_output_path(template, no_overwrite=False):
+def generate_output_path(template, no_overwrite=False, split_segments=False):
     """Generate an output file path, expanding %d (date) and %t (time) tokens.
 
     Tokens:
         %d → YYYYMMDD
         %t → HHMMSS
 
-    If no_overwrite is True and the file exists, appends _1, _2, etc.
+    If no_overwrite is True and the target exists, appends _1, _2, etc.
+    When split_segments is True, collision checks are based on the first
+    segment path rather than the unsuffixed base path.
     """
+    def target_exists(candidate):
+        if split_segments:
+            return os.path.exists(generate_segment_path(candidate, 1))
+        return os.path.exists(candidate)
+
     now = datetime.datetime.now()
     path = template.replace("%d", now.strftime("%Y%m%d"))
     path = path.replace("%t", now.strftime("%H%M%S"))
@@ -396,12 +403,12 @@ def generate_output_path(template, no_overwrite=False):
     if not no_overwrite:
         return path
 
-    if not os.path.exists(path):
+    if not target_exists(path):
         return path
 
     base, ext = os.path.splitext(path)
     counter = 1
-    while os.path.exists(f"{base}_{counter}{ext}"):
+    while target_exists(f"{base}_{counter}{ext}"):
         counter += 1
     return f"{base}_{counter}{ext}"
 
@@ -1594,18 +1601,32 @@ def build_overrides_from_args(args):
 
 def apply_runtime_options(recorder, args, audio_only=False):
     """Apply runtime stop/split options to a recorder before setup_writer()."""
-    if not audio_only and args.frames:
-        recorder.max_frames = args.frames
-    if args.time:
+    if args.frames is not None:
+        if args.frames <= 0:
+            print("Error: --frames must be a positive integer.")
+            sys.exit(1)
+        if not audio_only:
+            recorder.max_frames = args.frames
+    if args.time is not None:
+        if args.time <= 0:
+            print("Error: --time must be greater than 0.")
+            sys.exit(1)
         recorder.max_seconds = args.time
-    if args.split_every:
+    if args.split_every is not None:
+        if args.split_every <= 0:
+            print("Error: --split-every must be greater than 0.")
+            sys.exit(1)
         recorder.split_seconds = args.split_every
-    if args.split_size:
+    if args.split_size is not None:
         try:
-            recorder.split_size_bytes = parse_size(args.split_size)
+            split_size_bytes = parse_size(args.split_size)
         except ValueError:
             print(f"Error: Invalid split size '{args.split_size}'. Use a number or shorthand like '500m', '2g'.")
             sys.exit(1)
+        if split_size_bytes <= 0:
+            print("Error: --split-size must be greater than 0.")
+            sys.exit(1)
+        recorder.split_size_bytes = split_size_bytes
 
 
 def main():
@@ -1636,7 +1657,11 @@ def main():
             cfg["output"] = base + expected_ext
 
     # Expand output path tokens and handle --no-overwrite
-    cfg["output"] = generate_output_path(cfg["output"], no_overwrite=args.no_overwrite)
+    cfg["output"] = generate_output_path(
+        cfg["output"],
+        no_overwrite=args.no_overwrite,
+        split_segments=(args.split_every is not None or args.split_size is not None),
+    )
 
     if args.list_devices:
         check_camera_permission()
@@ -1679,6 +1704,8 @@ def main():
             print("Warning: --frames is ignored in audio-only mode.")
         if args.preview or args.preview_compressed:
             print("Warning: Preview modes are not available in audio-only mode.")
+            args.preview = False
+            args.preview_compressed = False
     else:
         check_camera_permission()
         if cfg["audio_enabled"]:

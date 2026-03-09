@@ -8,6 +8,7 @@ import signal
 import sys
 import tempfile
 import textwrap
+from argparse import Namespace
 from unittest import mock
 
 import pytest
@@ -250,6 +251,15 @@ class TestOutputFilename:
             open(path, "w").close()
             open(os.path.join(d, "capture_1.mp4"), "w").close()
             result = fruitcap.generate_output_path(path, no_overwrite=True)
+            assert result == os.path.join(d, "capture_2.mp4")
+
+    def test_no_overwrite_split_checks_first_segment(self):
+        """Split mode should avoid clobbering an existing first segment."""
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "capture.mp4")
+            open(os.path.join(d, "capture_001.mp4"), "w").close()
+            open(os.path.join(d, "capture_1_001.mp4"), "w").close()
+            result = fruitcap.generate_output_path(path, no_overwrite=True, split_segments=True)
             assert result == os.path.join(d, "capture_2.mp4")
 
     def test_overwrite_mode_returns_original(self):
@@ -733,6 +743,56 @@ class TestCliHelpers:
         assert overrides["discard_late_frames"] is False
 
 
+class TestApplyRuntimeOptions:
+    class DummyRecorder:
+        def __init__(self):
+            self.max_frames = None
+            self.max_seconds = None
+            self.split_seconds = None
+            self.split_size_bytes = None
+
+    def _args(self, **overrides):
+        base = {
+            "frames": None,
+            "time": None,
+            "split_every": None,
+            "split_size": None,
+        }
+        base.update(overrides)
+        return Namespace(**base)
+
+    def test_rejects_zero_frames(self):
+        recorder = self.DummyRecorder()
+        with pytest.raises(SystemExit):
+            fruitcap.apply_runtime_options(recorder, self._args(frames=0))
+
+    def test_rejects_negative_time(self):
+        recorder = self.DummyRecorder()
+        with pytest.raises(SystemExit):
+            fruitcap.apply_runtime_options(recorder, self._args(time=-1))
+
+    def test_rejects_zero_split_every(self):
+        recorder = self.DummyRecorder()
+        with pytest.raises(SystemExit):
+            fruitcap.apply_runtime_options(recorder, self._args(split_every=0))
+
+    def test_rejects_nonpositive_split_size(self):
+        recorder = self.DummyRecorder()
+        with pytest.raises(SystemExit):
+            fruitcap.apply_runtime_options(recorder, self._args(split_size="-1"))
+
+        with pytest.raises(SystemExit):
+            fruitcap.apply_runtime_options(recorder, self._args(split_size="0"))
+
+    def test_audio_only_frames_are_validated_but_not_applied(self):
+        recorder = self.DummyRecorder()
+        fruitcap.apply_runtime_options(recorder, self._args(frames=12), audio_only=True)
+        assert recorder.max_frames is None
+
+        with pytest.raises(SystemExit):
+            fruitcap.apply_runtime_options(recorder, self._args(frames=-1), audio_only=True)
+
+
 class TestRunHeadless:
     class FakeRecorder:
         def __init__(self):
@@ -839,6 +899,39 @@ class TestMainRuntimeConfiguration:
         recorder = self.FakeRecorder.instances[0]
         assert recorder.setup_writer_split_state == (300.0, 2 * 1024**3)
 
+    def test_main_no_overwrite_split_avoids_existing_segments(self):
+        cfg = {
+            "audio_only": False,
+            "audio_enabled": False,
+            "container": "mp4",
+            "output": "",
+            "codec": "h264",
+            "width": 1920,
+            "height": 1080,
+            "bit_depth": 8,
+            "chroma": "420",
+            "bitrate": 80_000_000,
+            "fps": None,
+            "audio_codec": "aac",
+            "audio_sample_rate": 48000,
+            "audio_channels": 2,
+        }
+        with tempfile.TemporaryDirectory() as d:
+            cfg["output"] = os.path.join(d, "capture.mp4")
+            open(os.path.join(d, "capture_001.mp4"), "w").close()
+            open(os.path.join(d, "capture_1_001.mp4"), "w").close()
+            with mock.patch.object(
+                sys, "argv", ["fruitcap.py", "--split-every", "300", "--no-overwrite"]
+            ):
+                with mock.patch("fruitcap.load_config", return_value=cfg.copy()):
+                    with mock.patch("fruitcap.check_camera_permission"):
+                        with mock.patch("fruitcap.Recorder", self.FakeRecorder):
+                            with mock.patch("fruitcap.run_headless"):
+                                fruitcap.main()
+
+        recorder = self.FakeRecorder.instances[0]
+        assert recorder.setup_writer_output == os.path.join(d, "capture_2.mp4")
+
     def test_main_uses_caf_extension_for_audio_only_pcm_defaults(self):
         cfg = {
             "audio_only": True,
@@ -866,3 +959,32 @@ class TestMainRuntimeConfiguration:
 
         recorder = self.FakeRecorder.instances[0]
         assert recorder.setup_writer_output == "capture.caf"
+
+    def test_main_audio_only_preview_falls_back_to_headless(self):
+        cfg = {
+            "audio_only": True,
+            "audio_enabled": True,
+            "container": "mp4",
+            "output": "capture.mp4",
+            "codec": "h264",
+            "width": 1920,
+            "height": 1080,
+            "bit_depth": 8,
+            "chroma": "420",
+            "bitrate": 80_000_000,
+            "fps": None,
+            "audio_codec": "aac",
+            "audio_bitrate": 256_000,
+            "audio_sample_rate": 48000,
+            "audio_channels": 2,
+        }
+        with mock.patch.object(sys, "argv", ["fruitcap.py", "--audio-only", "--preview"]):
+            with mock.patch("fruitcap.load_config", return_value=cfg.copy()):
+                with mock.patch("fruitcap.check_microphone_permission", return_value=True):
+                    with mock.patch("fruitcap.Recorder", self.FakeRecorder):
+                        with mock.patch("fruitcap.run_headless") as run_headless:
+                            with mock.patch("fruitcap.run_with_preview") as run_with_preview:
+                                fruitcap.main()
+
+        assert run_headless.called
+        assert not run_with_preview.called

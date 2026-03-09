@@ -670,10 +670,13 @@ class TestSegmentRollover:
         recorder = fruitcap.Recorder(cfg)
         recorder.running = True
         recorder.started_writing.set()
+        recorder._segment_session_started = True
         recorder.start_time = time.monotonic()
         recorder.writer = self.FakeWriter()
-        recorder.writer_input = self.FakeInput()
-        recorder.audio_writer_input = self.FakeInput()
+        current_video_input = self.FakeInput()
+        current_audio_input = self.FakeInput()
+        recorder.writer_input = current_video_input
+        recorder.audio_writer_input = current_audio_input
         recorder.split_size_bytes = 1
         recorder._segment_start_timestamp = "seg-start"
 
@@ -696,7 +699,7 @@ class TestSegmentRollover:
                 with mock.patch("fruitcap.CoreMedia.CMSampleBufferDataIsReady", return_value=True):
                     with mock.patch(
                         "fruitcap.CoreMedia.CMSampleBufferGetPresentationTimeStamp",
-                        return_value="ts",
+                        side_effect=["split-ts", "segment-ts"],
                     ):
                         with mock.patch("fruitcap.os.path.getsize", return_value=1):
                             recorder.handle_video_sample_buffer(object())
@@ -705,10 +708,18 @@ class TestSegmentRollover:
                             assert recorder._segment_num == 2
                             assert recorder.writer is next_writer
                             assert next_writer.started is True
-                            assert next_writer.session_timestamp == "ts"
+                            assert next_writer.session_timestamp is None
+                            assert recorder._segment_session_started is False
+                            assert current_video_input.append_count == 1
 
                             recorder.handle_audio_sample_buffer(object())
-                            assert next_audio_input.append_count == 1
+                            assert next_audio_input.append_count == 0
+
+                            recorder.split_size_bytes = None
+                            recorder.handle_video_sample_buffer(object())
+                            assert next_writer.session_timestamp == "segment-ts"
+                            assert recorder._segment_session_started is True
+                            assert next_video_input.append_count == 1
 
             allow_finalization.set()
             recorder._wait_for_pending_finalizations()

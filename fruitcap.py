@@ -606,6 +606,7 @@ class Recorder:
         self.split_size_bytes = None
         self._segment_num = 1
         self._segment_start_timestamp = None
+        self._segment_session_started = False
         self._segment_paths = []
         self._finalization_lock = threading.Lock()
         self._pending_finalizations = []
@@ -901,6 +902,16 @@ class Recorder:
         for thread in pending:
             thread.join()
 
+    def _start_current_segment_session(self, timestamp):
+        """Start the current writer session at the timestamp of its first sample."""
+        self.writer.startSessionAtSourceTime_(timestamp)
+        self._segment_start_timestamp = timestamp
+        self._segment_session_started = True
+        if not self.started_writing.is_set():
+            self.start_time = time.monotonic()
+            self._start_timestamp = timestamp
+            self.started_writing.set()
+
     def _splitting_enabled(self):
         return self.split_seconds is not None or self.split_size_bytes is not None
 
@@ -912,7 +923,7 @@ class Recorder:
     def _current_output_path(self):
         return self._output_path_for_segment(self._segment_num)
 
-    def _start_new_segment(self, timestamp):
+    def _start_new_segment(self):
         """Swap in a new current segment and return the old writer state."""
         old_output_path = self._current_output_path()
         old_state = (
@@ -926,8 +937,8 @@ class Recorder:
         self._segment_paths.append(new_path)
         self.writer, self.writer_input, self.audio_writer_input = self._create_writer(new_path)
         self.writer.startWriting()
-        self.writer.startSessionAtSourceTime_(timestamp)
-        self._segment_start_timestamp = timestamp
+        self._segment_start_timestamp = None
+        self._segment_session_started = False
         log(f"  Started segment {self._segment_num}: {new_path}")
         return old_state
 
@@ -935,6 +946,8 @@ class Recorder:
         output_path = self._output_path_for_segment(self._segment_num) if self._splitting_enabled() else self.cfg["output"]
         self._segment_paths.append(output_path)
         self.writer, self.writer_input, self.audio_writer_input = self._create_writer(output_path)
+        self._segment_start_timestamp = None
+        self._segment_session_started = False
 
     def start(self):
         self.running = True
@@ -1059,14 +1072,9 @@ class Recorder:
                 timestamp = CoreMedia.CMSampleBufferGetPresentationTimeStamp(
                     sample_buffer
                 )
-                if not self.started_writing.is_set():
-                    self.writer.startSessionAtSourceTime_(timestamp)
-                    self.start_time = time.monotonic()
-                    self._start_timestamp = timestamp
-                    self._segment_start_timestamp = timestamp
-                    self.started_writing.set()
-
                 if self.writer_input.isReadyForMoreMediaData():
+                    if not self._segment_session_started:
+                        self._start_current_segment_session(timestamp)
                     self.writer_input.appendSampleBuffer_(sample_buffer)
                     self.frames_written += 1
                     if self.compressed_preview:
@@ -1092,7 +1100,7 @@ class Recorder:
                             except OSError:
                                 pass
                         if need_split:
-                            old_state = self._start_new_segment(timestamp)
+                            old_state = self._start_new_segment()
                             self._queue_writer_finalization(
                                 old_state[0],
                                 writer_input=old_state[1],
@@ -1123,21 +1131,16 @@ class Recorder:
             if not self.running or not self.writer or not self.audio_writer_input:
                 return
             if self.writer.status() == AVF.AVAssetWriterStatusWriting:
-                # In audio-only mode, start the session from the first audio buffer
-                if self.cfg["audio_only"] and not self.started_writing.is_set():
-                    timestamp = CoreMedia.CMSampleBufferGetPresentationTimeStamp(
-                        sample_buffer
-                    )
-                    self.writer.startSessionAtSourceTime_(timestamp)
-                    self.start_time = time.monotonic()
-                    self._start_timestamp = timestamp
-                    self._segment_start_timestamp = timestamp
-                    self.started_writing.set()
-
-                if (
-                    self.started_writing.is_set()
-                    and self.audio_writer_input.isReadyForMoreMediaData()
-                ):
+                timestamp = None
+                if self.audio_writer_input.isReadyForMoreMediaData():
+                    if self.cfg["audio_only"]:
+                        if not self._segment_session_started:
+                            timestamp = CoreMedia.CMSampleBufferGetPresentationTimeStamp(
+                                sample_buffer
+                            )
+                            self._start_current_segment_session(timestamp)
+                    elif not self._segment_session_started:
+                        return
                     self.audio_writer_input.appendSampleBuffer_(sample_buffer)
 
                     if self.cfg["audio_only"]:
@@ -1145,9 +1148,10 @@ class Recorder:
 
                         # Check time limit
                         if self.max_seconds:
-                            timestamp = CoreMedia.CMSampleBufferGetPresentationTimeStamp(
-                                sample_buffer
-                            )
+                            if timestamp is None:
+                                timestamp = CoreMedia.CMSampleBufferGetPresentationTimeStamp(
+                                    sample_buffer
+                                )
                             elapsed = CoreMedia.CMTimeGetSeconds(
                                 CoreMedia.CMTimeSubtract(timestamp, self._start_timestamp)
                             )
@@ -1158,9 +1162,10 @@ class Recorder:
                         if self._splitting_enabled():
                             need_split = False
                             if self.split_seconds:
-                                timestamp = CoreMedia.CMSampleBufferGetPresentationTimeStamp(
-                                    sample_buffer
-                                )
+                                if timestamp is None:
+                                    timestamp = CoreMedia.CMSampleBufferGetPresentationTimeStamp(
+                                        sample_buffer
+                                    )
                                 seg_elapsed = CoreMedia.CMTimeGetSeconds(
                                     CoreMedia.CMTimeSubtract(timestamp, self._segment_start_timestamp)
                                 )
@@ -1176,10 +1181,11 @@ class Recorder:
                                 except OSError:
                                     pass
                             if need_split:
-                                timestamp = CoreMedia.CMSampleBufferGetPresentationTimeStamp(
-                                    sample_buffer
-                                )
-                                old_state = self._start_new_segment(timestamp)
+                                if timestamp is None:
+                                    timestamp = CoreMedia.CMSampleBufferGetPresentationTimeStamp(
+                                        sample_buffer
+                                    )
+                                old_state = self._start_new_segment()
                                 self._queue_writer_finalization(
                                     old_state[0],
                                     writer_input=old_state[1],

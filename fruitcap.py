@@ -1263,7 +1263,7 @@ class Recorder:
                             stop_requested = True
                     elif self.cfg["audio_only"]:
 
-                        self._update_audio_status()
+                        self._update_status()
 
                         # Check time limit
                         if self.max_seconds:
@@ -1324,9 +1324,8 @@ class Recorder:
         minutes, seconds = divmod(int(elapsed), 60)
         hours, minutes = divmod(minutes, 60)
 
-        output_path = self._current_output_path()
         try:
-            size_bytes = os.path.getsize(output_path)
+            size_bytes = os.path.getsize(self._current_output_path())
         except OSError:
             size_bytes = 0
 
@@ -1339,39 +1338,15 @@ class Recorder:
         else:
             size_str = f"{size_bytes} B"
 
-        dropped = f"  dropped: {self.frames_dropped}" if self.frames_dropped else ""
-        sys.stdout.write(
-            f"\r  {hours:02d}:{minutes:02d}:{seconds:02d}  "
-            f"frames: {self.frames_written}  "
-            f"size: {size_str}{dropped}   "
-        )
-        sys.stdout.flush()
-
-    def _update_audio_status(self):
-        if _quiet:
-            return
-        elapsed = time.monotonic() - self.start_time
-        minutes, seconds = divmod(int(elapsed), 60)
-        hours, minutes = divmod(minutes, 60)
-
-        output_path = self._current_output_path()
-        try:
-            size_bytes = os.path.getsize(output_path)
-        except OSError:
-            size_bytes = 0
-
-        if size_bytes >= 1_073_741_824:
-            size_str = f"{size_bytes / 1_073_741_824:.2f} GB"
-        elif size_bytes >= 1_048_576:
-            size_str = f"{size_bytes / 1_048_576:.1f} MB"
-        elif size_bytes >= 1024:
-            size_str = f"{size_bytes / 1024:.1f} KB"
+        if self.cfg["audio_only"]:
+            detail = ""
         else:
-            size_str = f"{size_bytes} B"
+            dropped = f"  dropped: {self.frames_dropped}" if self.frames_dropped else ""
+            detail = f"frames: {self.frames_written}  {dropped}"
 
         sys.stdout.write(
             f"\r  {hours:02d}:{minutes:02d}:{seconds:02d}  "
-            f"size: {size_str}   "
+            f"{detail}size: {size_str}   "
         )
         sys.stdout.flush()
 

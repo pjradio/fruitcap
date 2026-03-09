@@ -208,6 +208,10 @@ def load_config(path="fruitcap.cfg", overrides=None):
                 if not config.has_section("audio"):
                     config.add_section("audio")
                 config.set("audio", "channels", str(value))
+            elif key == "audio_enabled":
+                if not config.has_section("audio"):
+                    config.add_section("audio")
+                config.set("audio", "capture", "yes" if value else "no")
 
     res = config.get("capture", "resolution", fallback="4k").strip().lower()
     if res in RESOLUTION_PRESETS:
@@ -1610,6 +1614,10 @@ def build_parser():
     parser.add_argument("--device", metavar="NAME_OR_INDEX", help="Video device name or index")
     parser.add_argument("--audio-device", metavar="NAME_OR_INDEX", help="Audio device name or index")
     parser.add_argument(
+        "--audio", action=argparse.BooleanOptionalAction, default=None,
+        help="Enable or disable audio capture (overrides config)",
+    )
+    parser.add_argument(
         "--audio-codec",
         dest="audio_codec",
         choices=["aac", "alac", "pcm"],
@@ -1675,6 +1683,8 @@ def build_overrides_from_args(args):
             overrides[name] = value
     if args.audio_only:
         overrides["audio_only"] = True
+    if args.audio is not None:
+        overrides["audio_enabled"] = args.audio
     if args.discard_late_frames is not None:
         overrides["discard_late_frames"] = args.discard_late_frames
     return overrides

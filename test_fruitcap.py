@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Tests for fruitcap improvements."""
 
 import configparser
@@ -681,17 +682,21 @@ class TestOutputFileType:
 
 
 class TestWriterMetadata:
-    def test_mp4_uses_itunes_encoding_tool_identifier(self):
+    def test_mp4_uses_itunes_encoding_tool_key(self):
         metadata = fruitcap.build_writer_metadata(fruitcap.AVF.AVFileTypeMPEG4)
         assert len(metadata) == 1
-        assert metadata[0].identifier() == fruitcap.AVF.AVMetadataIdentifieriTunesMetadataEncodingTool
+        assert metadata[0].keySpace() == fruitcap.AVF.AVMetadataKeySpaceiTunes
+        assert metadata[0].key() == fruitcap.AVF.AVMetadataiTunesMetadataKeyEncodingTool
         assert metadata[0].value() == "fruitcap.py"
+        assert metadata[0].dataType() == fruitcap.AVF.kCMMetadataBaseDataType_UTF8
 
-    def test_mov_uses_quicktime_software_identifier(self):
+    def test_mov_uses_quicktime_software_key(self):
         metadata = fruitcap.build_writer_metadata(fruitcap.AVF.AVFileTypeQuickTimeMovie)
         assert len(metadata) == 1
-        assert metadata[0].identifier() == fruitcap.AVF.AVMetadataIdentifierQuickTimeMetadataSoftware
+        assert metadata[0].keySpace() == fruitcap.AVF.AVMetadataKeySpaceQuickTimeMetadata
+        assert metadata[0].key() == fruitcap.AVF.AVMetadataQuickTimeMetadataKeySoftware
         assert metadata[0].value() == "fruitcap.py"
+        assert metadata[0].dataType() == fruitcap.AVF.kCMMetadataBaseDataType_UTF8
 
     def test_caf_falls_back_to_common_software_identifier(self):
         metadata = fruitcap.build_writer_metadata(fruitcap.AVF.AVFileTypeCoreAudioFormat)

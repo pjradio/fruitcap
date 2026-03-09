@@ -420,14 +420,18 @@ def get_output_file_type_and_extension(cfg):
 def build_writer_metadata(file_type):
     """Return writer metadata items describing the authoring software."""
     item = AVF.AVMutableMetadataItem.alloc().init()
+    item.setValue_("fruitcap.py")
     if file_type in (AVF.AVFileTypeMPEG4, AVF.AVFileTypeAppleM4A):
-        item.setIdentifier_(AVF.AVMetadataIdentifieriTunesMetadataEncodingTool)
+        item.setKeySpace_(AVF.AVMetadataKeySpaceiTunes)
+        item.setKey_(AVF.AVMetadataiTunesMetadataKeyEncodingTool)
+        item.setDataType_(AVF.kCMMetadataBaseDataType_UTF8)
     elif file_type == AVF.AVFileTypeQuickTimeMovie:
-        item.setIdentifier_(AVF.AVMetadataIdentifierQuickTimeMetadataSoftware)
+        item.setKeySpace_(AVF.AVMetadataKeySpaceQuickTimeMetadata)
+        item.setKey_(AVF.AVMetadataQuickTimeMetadataKeySoftware)
+        item.setDataType_(AVF.kCMMetadataBaseDataType_UTF8)
     else:
         item.setIdentifier_(AVF.AVMetadataCommonIdentifierSoftware)
-    item.setValue_("fruitcap.py")
-    item.setLocale_(Foundation.NSLocale.currentLocale())
+        item.setLocale_(Foundation.NSLocale.currentLocale())
     return [item]
 
 

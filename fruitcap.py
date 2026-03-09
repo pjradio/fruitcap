@@ -614,6 +614,8 @@ class Recorder:
         self._segment_paths = []
         self._finalization_lock = threading.Lock()
         self._pending_finalizations = []
+        self._writer_failure_lock = threading.Lock()
+        self._writer_failure_reported = False
 
     def find_device(self, selector=None):
         devices = get_devices(AVF.AVMediaTypeVideo)
@@ -866,9 +868,54 @@ class Recorder:
 
         return writer, writer_input, audio_writer_input
 
+    def _writer_error_text(self, writer, fallback_error=None):
+        if fallback_error is not None:
+            return str(fallback_error)
+        if writer is None:
+            return "unknown error"
+        try:
+            error = writer.error()
+        except Exception:
+            error = None
+        if error is None:
+            return "unknown error"
+        try:
+            description = error.localizedDescription()
+        except Exception:
+            description = None
+        return str(description or error)
+
+    def _report_writer_failure(self, operation, writer=None, output_path=None, fallback_error=None):
+        with self._writer_failure_lock:
+            if self._writer_failure_reported:
+                return
+            self._writer_failure_reported = True
+        label = f" for '{output_path}'" if output_path else ""
+        detail = self._writer_error_text(writer, fallback_error=fallback_error)
+        print(f"\nError: AVAssetWriter failed to {operation}{label}: {detail}")
+
+    def _start_writer(self, writer, output_path):
+        try:
+            started = writer.startWriting()
+        except Exception as exc:
+            self._report_writer_failure("start", writer, output_path=output_path, fallback_error=exc)
+            return False
+        if not started:
+            self._report_writer_failure("start", writer, output_path=output_path)
+            return False
+        return True
+
     def _finalize_writer_state(self, writer, writer_input=None, audio_writer_input=None, output_path=None):
         """Finalize a writer/input set synchronously."""
-        if writer and writer.status() == AVF.AVAssetWriterStatusWriting:
+        if not writer:
+            return
+
+        status = writer.status()
+        if status == AVF.AVAssetWriterStatusFailed:
+            self._report_writer_failure("finish writing", writer, output_path=output_path)
+            return
+
+        if status == AVF.AVAssetWriterStatusWriting:
             if writer_input:
                 writer_input.markAsFinished()
             if audio_writer_input:
@@ -936,15 +983,26 @@ class Recorder:
             self.audio_writer_input,
             old_output_path,
         )
-        self._segment_num += 1
-        new_path = self._output_path_for_segment(self._segment_num)
+        next_segment_num = self._segment_num + 1
+        new_path = self._output_path_for_segment(next_segment_num)
+        new_writer, new_writer_input, new_audio_writer_input = self._create_writer(new_path)
+        if not self._start_writer(new_writer, new_path):
+            self.writer = None
+            self.writer_input = None
+            self.audio_writer_input = None
+            self._segment_session_started = False
+            self._segment_start_timestamp = None
+            return old_state, False
+
+        self._segment_num = next_segment_num
         self._segment_paths.append(new_path)
-        self.writer, self.writer_input, self.audio_writer_input = self._create_writer(new_path)
-        self.writer.startWriting()
+        self.writer = new_writer
+        self.writer_input = new_writer_input
+        self.audio_writer_input = new_audio_writer_input
         self._segment_start_timestamp = None
         self._segment_session_started = False
         log(f"  Started segment {self._segment_num}: {new_path}")
-        return old_state
+        return old_state, True
 
     def setup_writer(self):
         output_path = self._output_path_for_segment(self._segment_num) if self._splitting_enabled() else self.cfg["output"]
@@ -954,10 +1012,12 @@ class Recorder:
         self._segment_session_started = False
 
     def start(self):
-        self.running = True
-        self.writer.startWriting()
-        self.session.startRunning()
         output_path = self._current_output_path()
+        if not self._start_writer(self.writer, output_path):
+            self.running = False
+            sys.exit(1)
+        self.running = True
+        self.session.startRunning()
         if self.cfg["audio_only"]:
             audio_codec_labels = {"alac": "ALAC", "pcm": "PCM", "aac": "AAC"}
             audio_codec = audio_codec_labels.get(self.cfg["audio_codec"], self.cfg["audio_codec"])
@@ -1072,54 +1132,83 @@ class Recorder:
         with self.lock:
             if not self.running or not self.writer or not self.writer_input:
                 return
-            if self.writer.status() == AVF.AVAssetWriterStatusWriting:
+            status = self.writer.status()
+            if status == AVF.AVAssetWriterStatusFailed:
+                self._report_writer_failure(
+                    "write video data",
+                    self.writer,
+                    output_path=self._current_output_path(),
+                )
+                stop_requested = True
+            elif status == AVF.AVAssetWriterStatusWriting:
                 timestamp = CoreMedia.CMSampleBufferGetPresentationTimeStamp(
                     sample_buffer
                 )
                 if self.writer_input.isReadyForMoreMediaData():
                     if not self._segment_session_started:
                         self._start_current_segment_session(timestamp)
-                    self.writer_input.appendSampleBuffer_(sample_buffer)
-                    self.frames_written += 1
-                    if self.compressed_preview:
-                        self.compressed_preview.encode_frame(sample_buffer)
-                    self._update_status()
-
-                    # Check segment split conditions
-                    if self._splitting_enabled():
-                        need_split = False
-                        if self.split_seconds:
-                            seg_elapsed = CoreMedia.CMTimeGetSeconds(
-                                CoreMedia.CMTimeSubtract(timestamp, self._segment_start_timestamp)
-                            )
-                            if seg_elapsed >= self.split_seconds:
-                                need_split = True
-                        if self.split_size_bytes:
-                            try:
-                                cur_size = os.path.getsize(
-                                    self._output_path_for_segment(self._segment_num)
-                                )
-                                if cur_size >= self.split_size_bytes:
-                                    need_split = True
-                            except OSError:
-                                pass
-                        if need_split:
-                            old_state = self._start_new_segment()
-                            self._queue_writer_finalization(
-                                old_state[0],
-                                writer_input=old_state[1],
-                                audio_writer_input=old_state[2],
-                                output_path=old_state[3],
-                            )
-
-                    if self.max_frames and self.frames_written >= self.max_frames:
-                        stop_requested = True
-                    elif self.max_seconds:
-                        elapsed = CoreMedia.CMTimeGetSeconds(
-                            CoreMedia.CMTimeSubtract(timestamp, self._start_timestamp)
+                    try:
+                        appended = self.writer_input.appendSampleBuffer_(sample_buffer)
+                    except Exception as exc:
+                        self._report_writer_failure(
+                            "write video data",
+                            self.writer,
+                            output_path=self._current_output_path(),
+                            fallback_error=exc,
                         )
-                        if elapsed >= self.max_seconds:
+                        stop_requested = True
+                        appended = False
+                    if not appended:
+                        if not stop_requested:
+                            self._report_writer_failure(
+                                "write video data",
+                                self.writer,
+                                output_path=self._current_output_path(),
+                            )
                             stop_requested = True
+                    else:
+                        self.frames_written += 1
+                        if self.compressed_preview:
+                            self.compressed_preview.encode_frame(sample_buffer)
+                        self._update_status()
+
+                        # Check segment split conditions
+                        if self._splitting_enabled():
+                            need_split = False
+                            if self.split_seconds:
+                                seg_elapsed = CoreMedia.CMTimeGetSeconds(
+                                    CoreMedia.CMTimeSubtract(timestamp, self._segment_start_timestamp)
+                                )
+                                if seg_elapsed >= self.split_seconds:
+                                    need_split = True
+                            if self.split_size_bytes:
+                                try:
+                                    cur_size = os.path.getsize(
+                                        self._output_path_for_segment(self._segment_num)
+                                    )
+                                    if cur_size >= self.split_size_bytes:
+                                        need_split = True
+                                except OSError:
+                                    pass
+                            if need_split:
+                                old_state, next_segment_started = self._start_new_segment()
+                                if not next_segment_started:
+                                    stop_requested = True
+                                self._queue_writer_finalization(
+                                    old_state[0],
+                                    writer_input=old_state[1],
+                                    audio_writer_input=old_state[2],
+                                    output_path=old_state[3],
+                                )
+
+                        if self.max_frames and self.frames_written >= self.max_frames:
+                            stop_requested = True
+                        elif self.max_seconds:
+                            elapsed = CoreMedia.CMTimeGetSeconds(
+                                CoreMedia.CMTimeSubtract(timestamp, self._start_timestamp)
+                            )
+                            if elapsed >= self.max_seconds:
+                                stop_requested = True
         if stop_requested:
             self._trigger_stop()
 
@@ -1134,7 +1223,15 @@ class Recorder:
         with self.lock:
             if not self.running or not self.writer or not self.audio_writer_input:
                 return
-            if self.writer.status() == AVF.AVAssetWriterStatusWriting:
+            status = self.writer.status()
+            if status == AVF.AVAssetWriterStatusFailed:
+                self._report_writer_failure(
+                    "write audio data",
+                    self.writer,
+                    output_path=self._current_output_path(),
+                )
+                stop_requested = True
+            elif status == AVF.AVAssetWriterStatusWriting:
                 timestamp = None
                 if self.audio_writer_input.isReadyForMoreMediaData():
                     if self.cfg["audio_only"]:
@@ -1145,9 +1242,27 @@ class Recorder:
                             self._start_current_segment_session(timestamp)
                     elif not self._segment_session_started:
                         return
-                    self.audio_writer_input.appendSampleBuffer_(sample_buffer)
+                    try:
+                        appended = self.audio_writer_input.appendSampleBuffer_(sample_buffer)
+                    except Exception as exc:
+                        self._report_writer_failure(
+                            "write audio data",
+                            self.writer,
+                            output_path=self._current_output_path(),
+                            fallback_error=exc,
+                        )
+                        stop_requested = True
+                        appended = False
+                    if not appended:
+                        if not stop_requested:
+                            self._report_writer_failure(
+                                "write audio data",
+                                self.writer,
+                                output_path=self._current_output_path(),
+                            )
+                            stop_requested = True
+                    elif self.cfg["audio_only"]:
 
-                    if self.cfg["audio_only"]:
                         self._update_audio_status()
 
                         # Check time limit
@@ -1189,7 +1304,9 @@ class Recorder:
                                     timestamp = CoreMedia.CMSampleBufferGetPresentationTimeStamp(
                                         sample_buffer
                                     )
-                                old_state = self._start_new_segment()
+                                old_state, next_segment_started = self._start_new_segment()
+                                if not next_segment_started:
+                                    stop_requested = True
                                 self._queue_writer_finalization(
                                     old_state[0],
                                     writer_input=old_state[1],

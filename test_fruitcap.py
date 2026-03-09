@@ -626,6 +626,7 @@ class TestSegmentRollover:
 
         def appendSampleBuffer_(self, sample_buffer):
             self.append_count += 1
+            return True
 
         def markAsFinished(self):
             return None
@@ -643,6 +644,7 @@ class TestSegmentRollover:
 
         def startWriting(self):
             self.started = True
+            return True
 
         def startSessionAtSourceTime_(self, timestamp):
             self.session_timestamp = timestamp
@@ -723,6 +725,169 @@ class TestSegmentRollover:
 
             allow_finalization.set()
             recorder._wait_for_pending_finalizations()
+
+
+class TestWriterFailureHandling:
+    class FakeError:
+        def __init__(self, message):
+            self.message = message
+
+        def localizedDescription(self):
+            return self.message
+
+        def __str__(self):
+            return self.message
+
+    class FakeSession:
+        def __init__(self):
+            self.started = False
+
+        def startRunning(self):
+            self.started = True
+
+        def stopRunning(self):
+            return None
+
+    class FakeInput:
+        def __init__(self, append_result=True, append_exc=None):
+            self.append_result = append_result
+            self.append_exc = append_exc
+            self.append_count = 0
+
+        def isReadyForMoreMediaData(self):
+            return True
+
+        def appendSampleBuffer_(self, sample_buffer):
+            self.append_count += 1
+            if self.append_exc is not None:
+                raise self.append_exc
+            return self.append_result
+
+        def markAsFinished(self):
+            return None
+
+    class FakeWriter:
+        def __init__(self, start_result=True, status=None, error_message="writer error"):
+            self.start_result = start_result
+            self._status = status if status is not None else fruitcap.AVF.AVAssetWriterStatusWriting
+            self.error_message = error_message
+            self.session_timestamp = None
+            self.start_calls = 0
+
+        def startWriting(self):
+            self.start_calls += 1
+            if self.start_result:
+                self._status = fruitcap.AVF.AVAssetWriterStatusWriting
+            else:
+                self._status = fruitcap.AVF.AVAssetWriterStatusFailed
+            return self.start_result
+
+        def status(self):
+            return self._status
+
+        def error(self):
+            return TestWriterFailureHandling.FakeError(self.error_message)
+
+        def finishWritingWithCompletionHandler_(self, callback):
+            callback()
+
+        def startSessionAtSourceTime_(self, timestamp):
+            self.session_timestamp = timestamp
+
+    def _cfg(self):
+        return {
+            "audio_only": False,
+            "audio_enabled": True,
+            "container": "mp4",
+            "output": "capture.mp4",
+            "codec": "h264",
+            "width": 1920,
+            "height": 1080,
+            "bit_depth": 8,
+            "chroma": "420",
+            "bitrate": 80_000_000,
+            "fps": None,
+            "discard_late_frames": False,
+            "color_space": "bt709",
+            "audio_codec": "aac",
+            "audio_bitrate": 256_000,
+            "audio_sample_rate": 48000,
+            "audio_channels": 2,
+        }
+
+    def test_start_exits_when_writer_fails_to_start(self, capsys):
+        recorder = fruitcap.Recorder(self._cfg())
+        recorder.writer = self.FakeWriter(start_result=False, error_message="bad writer settings")
+        recorder.session = self.FakeSession()
+
+        with pytest.raises(SystemExit):
+            recorder.start()
+
+        assert recorder.running is False
+        assert recorder.session.started is False
+        assert "bad writer settings" in capsys.readouterr().out
+
+    def test_video_append_failure_reports_and_triggers_stop(self, capsys):
+        recorder = fruitcap.Recorder(self._cfg())
+        recorder.running = True
+        recorder.writer = self.FakeWriter(error_message="disk full")
+        recorder.writer_input = self.FakeInput(append_result=False)
+        recorder._stop_callback = mock.Mock()
+
+        with mock.patch("fruitcap.CoreMedia.CMSampleBufferDataIsReady", return_value=True):
+            with mock.patch(
+                "fruitcap.CoreMedia.CMSampleBufferGetPresentationTimeStamp",
+                return_value="ts",
+            ):
+                with mock.patch.object(recorder, "_update_status") as update_status:
+                    recorder.handle_video_sample_buffer(object())
+
+        recorder._stop_callback.assert_called_once()
+        update_status.assert_not_called()
+        assert recorder.frames_written == 0
+        assert recorder.writer_input.append_count == 1
+        assert recorder.writer.session_timestamp == "ts"
+        assert "disk full" in capsys.readouterr().out
+
+    def test_split_rollover_stops_if_next_writer_fails_to_start(self, capsys):
+        recorder = fruitcap.Recorder(self._cfg())
+        recorder.running = True
+        recorder.started_writing.set()
+        recorder._segment_session_started = True
+        recorder.start_time = time.monotonic()
+        recorder.writer = self.FakeWriter()
+        current_video_input = self.FakeInput()
+        current_audio_input = self.FakeInput()
+        recorder.writer_input = current_video_input
+        recorder.audio_writer_input = current_audio_input
+        recorder.split_size_bytes = 1
+        recorder._segment_start_timestamp = "seg-start"
+        recorder._stop_callback = mock.Mock()
+
+        next_writer = self.FakeWriter(start_result=False, error_message="next segment failed")
+        next_video_input = self.FakeInput()
+        next_audio_input = self.FakeInput()
+        recorder._create_writer = mock.Mock(
+            return_value=(next_writer, next_video_input, next_audio_input)
+        )
+
+        with mock.patch.object(recorder, "_queue_writer_finalization") as queue_finalization:
+            with mock.patch.object(recorder, "_update_status"):
+                with mock.patch("fruitcap.CoreMedia.CMSampleBufferDataIsReady", return_value=True):
+                    with mock.patch(
+                        "fruitcap.CoreMedia.CMSampleBufferGetPresentationTimeStamp",
+                        return_value="split-ts",
+                    ):
+                        with mock.patch("fruitcap.os.path.getsize", return_value=1):
+                            recorder.handle_video_sample_buffer(object())
+
+        recorder._stop_callback.assert_called_once()
+        queue_finalization.assert_called_once()
+        assert recorder._segment_num == 1
+        assert recorder.writer is None
+        assert recorder.writer_input is None
+        assert current_video_input.append_count == 1
+        assert "next segment failed" in capsys.readouterr().out
 
 
 # ── Audio-only mode ──

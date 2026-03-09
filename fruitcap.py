@@ -1858,12 +1858,14 @@ def main():
     overrides = build_overrides_from_args(args)
     cfg = load_config(args.config, overrides=overrides or None)
 
-    # If user didn't explicitly set output, match extension to container/mode
-    if not args.output:
-        base, ext = os.path.splitext(cfg["output"])
-        _, expected_ext = get_output_file_type_and_extension(cfg)
-        if ext.lower() != expected_ext:
-            cfg["output"] = base + expected_ext
+    # Match output extension to the actual container/mode
+    base, ext = os.path.splitext(cfg["output"])
+    _, expected_ext = get_output_file_type_and_extension(cfg)
+    if ext.lower() != expected_ext:
+        old_output = cfg["output"]
+        cfg["output"] = base + expected_ext
+        if args.output:
+            log(f"Note: Output extension changed from '{ext}' to '{expected_ext}' to match {cfg['container'].upper()} container.")
 
     # Expand output path tokens and handle --no-overwrite
     cfg["output"] = generate_output_path(

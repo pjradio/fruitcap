@@ -680,6 +680,20 @@ class TestOutputFileType:
         assert ext == ".caf"
 
 
+class TestWriterMetadata:
+    def test_mp4_uses_quicktime_software_identifier(self):
+        metadata = fruitcap.build_writer_metadata(fruitcap.AVF.AVFileTypeMPEG4)
+        assert len(metadata) == 1
+        assert metadata[0].identifier() == fruitcap.AVF.AVMetadataIdentifierQuickTimeMetadataSoftware
+        assert metadata[0].value() == "fruitcap.py"
+
+    def test_caf_falls_back_to_common_software_identifier(self):
+        metadata = fruitcap.build_writer_metadata(fruitcap.AVF.AVFileTypeCoreAudioFormat)
+        assert len(metadata) == 1
+        assert metadata[0].identifier() == fruitcap.AVF.AVMetadataCommonIdentifierSoftware
+        assert metadata[0].value() == "fruitcap.py"
+
+
 class TestCliHelpers:
     def test_build_overrides_includes_audio_settings(self):
         parser = fruitcap.build_parser()

@@ -417,6 +417,22 @@ def get_output_file_type_and_extension(cfg):
     return AVF.AVFileTypeMPEG4, ".mp4"
 
 
+def build_writer_metadata(file_type):
+    """Return writer metadata items describing the authoring software."""
+    item = AVF.AVMutableMetadataItem.alloc().init()
+    if file_type in (
+        AVF.AVFileTypeMPEG4,
+        AVF.AVFileTypeQuickTimeMovie,
+        AVF.AVFileTypeAppleM4A,
+    ):
+        item.setIdentifier_(AVF.AVMetadataIdentifierQuickTimeMetadataSoftware)
+    else:
+        item.setIdentifier_(AVF.AVMetadataCommonIdentifierSoftware)
+    item.setValue_("fruitcap.py")
+    item.setLocale_(Foundation.NSLocale.currentLocale())
+    return [item]
+
+
 def get_device_formats(device):
     """Extract supported formats from a capture device.
 
@@ -804,6 +820,7 @@ class Recorder:
         if error:
             print(f"Error creating writer: {error}")
             sys.exit(1)
+        writer.setMetadata_(build_writer_metadata(file_type))
 
         video_settings, audio_settings = self._get_output_settings()
 

@@ -20,7 +20,7 @@ pip install pyobjc-framework-AVFoundation pyobjc-framework-CoreMedia pyobjc-fram
 python3 fruitcap.py [options]
 ```
 
-Press `q` then Enter to stop recording. A live status line shows elapsed time, frames captured, file size, and any dropped frames.
+Press `q` then Enter to stop recording. A live status line shows elapsed time, frames captured, file size, and any dropped frames. By default, output filenames include the current date and time.
 
 ### Common Examples
 
@@ -41,7 +41,7 @@ python3 fruitcap.py --list-devices
 python3 fruitcap.py --device "DNxIO" --list-formats
 
 # Record from a specific device with timestamped output
-python3 fruitcap.py --device 1 -o "capture_%d_%t.mp4"
+python3 fruitcap.py --device 1 -o "capture-%d-%t.mp4"
 
 # Record with segment splitting every 5 minutes
 python3 fruitcap.py --split-every 300
@@ -59,15 +59,21 @@ python3 fruitcap.py --split-every 300
 | `--chroma` | Chroma subsampling: `420` or `422` |
 | `--bit-depth` | Bit depth: `8` or `10` |
 | `--color-space` | Color space: `bt709`, `bt2020`, `hlg`, `pq` |
+| `--discard-late-frames`, `--no-discard-late-frames` | Enable or disable dropping late video frames |
 | `-o`, `--output` | Output file path (supports `%d` date, `%t` time tokens) |
 | `--no-overwrite` | Append `_1`, `_2`, etc. instead of overwriting |
 | `--config` | Path to alternate config file |
 | `--device` | Select video device by index or name substring |
 | `--audio-device` | Select audio device by index or name substring |
+| `--audio-codec` | Audio codec: `aac`, `alac`, `pcm` |
+| `--audio-bitrate` | Audio bitrate for AAC, e.g. `256k` |
+| `--audio-sample-rate` | Audio sample rate in Hz |
+| `--audio-channels` | Audio channel count |
 | `--list-devices` | List available video and audio capture devices |
 | `--list-formats` | List supported pixel formats and frame rates for the selected device |
 | `--time` | Stop recording after N seconds (supports fractional) |
 | `--frames` | Stop recording after N frames |
+| `--audio-only` | Record audio only |
 | `--preview` | Show live source preview window |
 | `--preview-compressed` | Show compressed output preview window |
 | `-p`, `--preview-both` | Show both source and compressed preview windows |
@@ -87,7 +93,7 @@ bit_depth = 8
 chroma = 420
 bitrate = 80000000
 discard_late_frames = no
-output = capture.mp4
+output = capture-%d-%t.mp4
 
 [audio]
 capture = yes
@@ -108,7 +114,7 @@ channels = 2
 - **fps** — Frame rate (omit for device native rate)
 - **color_space** — `bt709`, `bt2020`, `hlg`, `pq`
 - **discard_late_frames** — `yes` to drop frames if encoder falls behind
-- **output** — Output file path (`%d` = date, `%t` = time)
+- **output** — Output file path (`%d` = `YYYYMMDD`, `%t` = `HHMMSS`)
 
 ### Audio Settings
 
@@ -117,6 +123,8 @@ channels = 2
 - **bitrate** — AAC bitrate in bps (ignored for ALAC/PCM)
 - **sample_rate** — Sample rate in Hz
 - **channels** — Number of audio channels
+
+In `--audio-only` mode, fruitcap defaults to `.m4a` output for AAC/ALAC and `.caf` for PCM.
 
 ### ProRes
 
@@ -135,7 +143,7 @@ bit_depth = 10
 chroma = 422
 bitrate = 150000000
 discard_late_frames = no
-output = capture.mp4
+output = capture-%d-%t.mp4
 
 [audio]
 capture = yes

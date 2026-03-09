@@ -118,6 +118,18 @@ class TestCliOverrides:
         assert cfg["codec"] == "h264"
         assert cfg["bitrate"] == 50_000_000
 
+    def test_default_output_template_is_timestamped(self):
+        path = self._write_cfg("[capture]\ncodec = h264\n[audio]\n")
+        cfg = fruitcap.load_config(path)
+        os.unlink(path)
+        assert cfg["output"] == "capture-%d-%t.mp4"
+
+    def test_output_template_tokens_load_from_config(self):
+        path = self._write_cfg("[capture]\noutput = custom_%d_%t.mov\n[audio]\n")
+        cfg = fruitcap.load_config(path)
+        os.unlink(path)
+        assert cfg["output"] == "custom_%d_%t.mov"
+
 
 # ── SIGTERM handling ──
 
@@ -193,7 +205,7 @@ class TestDeviceSelection:
 class TestOutputFilename:
     def test_date_token(self):
         path = fruitcap.generate_output_path("capture_%d.mp4")
-        today = datetime.date.today().isoformat()
+        today = datetime.date.today().strftime("%Y%m%d")
         assert today in path
         assert path.endswith(".mp4")
 
@@ -208,7 +220,7 @@ class TestOutputFilename:
 
     def test_both_tokens(self):
         path = fruitcap.generate_output_path("cap_%d_%t.mp4")
-        today = datetime.date.today().isoformat()
+        today = datetime.date.today().strftime("%Y%m%d")
         assert today in path
 
     def test_no_tokens(self):
@@ -643,3 +655,189 @@ class TestAudioOnly:
         cfg = fruitcap.load_config(path, overrides={"audio_only": True, "audio_channels": "1"})
         os.unlink(path)
         assert cfg["audio_channels"] == 1
+
+
+class TestOutputFileType:
+    def test_video_mp4_uses_mpeg4(self):
+        file_type, ext = fruitcap.get_output_file_type_and_extension(
+            {"audio_only": False, "container": "mp4"}
+        )
+        assert file_type == fruitcap.AVF.AVFileTypeMPEG4
+        assert ext == ".mp4"
+
+    def test_video_mov_uses_quicktime(self):
+        file_type, ext = fruitcap.get_output_file_type_and_extension(
+            {"audio_only": False, "container": "mov"}
+        )
+        assert file_type == fruitcap.AVF.AVFileTypeQuickTimeMovie
+        assert ext == ".mov"
+
+    def test_audio_only_pcm_uses_caf(self):
+        file_type, ext = fruitcap.get_output_file_type_and_extension(
+            {"audio_only": True, "audio_codec": "pcm"}
+        )
+        assert file_type == fruitcap.AVF.AVFileTypeCoreAudioFormat
+        assert ext == ".caf"
+
+
+class TestCliHelpers:
+    def test_build_overrides_includes_audio_settings(self):
+        parser = fruitcap.build_parser()
+        args = parser.parse_args([
+            "--audio-codec", "alac",
+            "--audio-bitrate", "320k",
+            "--audio-sample-rate", "96000",
+            "--audio-channels", "1",
+        ])
+        overrides = fruitcap.build_overrides_from_args(args)
+        assert overrides["audio_codec"] == "alac"
+        assert overrides["audio_bitrate"] == "320k"
+        assert overrides["audio_sample_rate"] == 96000
+        assert overrides["audio_channels"] == 1
+
+    def test_build_overrides_includes_discard_late_frames(self):
+        parser = fruitcap.build_parser()
+        args = parser.parse_args(["--discard-late-frames"])
+        overrides = fruitcap.build_overrides_from_args(args)
+        assert overrides["discard_late_frames"] is True
+
+    def test_build_overrides_can_disable_discard_late_frames(self):
+        parser = fruitcap.build_parser()
+        args = parser.parse_args(["--no-discard-late-frames"])
+        overrides = fruitcap.build_overrides_from_args(args)
+        assert overrides["discard_late_frames"] is False
+
+
+class TestRunHeadless:
+    class FakeRecorder:
+        def __init__(self):
+            self.running = True
+            self.stop_calls = 0
+
+        def stop(self):
+            self.stop_calls += 1
+            self.running = False
+
+    def test_noninteractive_waits_for_recorder_to_stop(self):
+        recorder = self.FakeRecorder()
+        fake_stdin = mock.Mock()
+        fake_stdin.isatty.return_value = False
+
+        def fake_sleep(_):
+            recorder.running = False
+
+        with mock.patch.object(fruitcap.sys, "stdin", fake_stdin):
+            with mock.patch("fruitcap.time.sleep", side_effect=fake_sleep):
+                fruitcap.run_headless(recorder)
+
+        assert recorder.stop_calls == 1
+
+    def test_interactive_mode_does_not_block_after_auto_stop(self):
+        recorder = self.FakeRecorder()
+        fake_stdin = mock.Mock()
+        fake_stdin.isatty.return_value = True
+        fake_stdin.readline.side_effect = AssertionError("readline should not be called")
+
+        def fake_select(*_args, **_kwargs):
+            recorder.running = False
+            return [], [], []
+
+        with mock.patch.object(fruitcap.sys, "stdin", fake_stdin):
+            with mock.patch("fruitcap.select.select", side_effect=fake_select):
+                fruitcap.run_headless(recorder)
+
+        assert recorder.stop_calls == 1
+
+
+class TestMainRuntimeConfiguration:
+    class FakeRecorder:
+        instances = []
+
+        def __init__(self, cfg):
+            self.cfg = cfg
+            self.running = False
+            self.split_seconds = None
+            self.split_size_bytes = None
+            self.max_frames = None
+            self.max_seconds = None
+            self.compressed_preview = None
+            self.setup_writer_split_state = None
+            self.setup_writer_output = None
+            self.__class__.instances.append(self)
+
+        def find_device(self, selector=None):
+            return object()
+
+        def find_audio_device(self, selector=None):
+            return object()
+
+        def setup_session(self, device=None, audio_device=None):
+            return None
+
+        def setup_writer(self):
+            self.setup_writer_split_state = (self.split_seconds, self.split_size_bytes)
+            self.setup_writer_output = self.cfg["output"]
+
+        def start(self):
+            self.running = False
+
+        def stop(self):
+            self.running = False
+
+    def setup_method(self):
+        self.FakeRecorder.instances = []
+
+    def test_main_applies_split_options_before_setup_writer(self):
+        cfg = {
+            "audio_only": False,
+            "audio_enabled": False,
+            "container": "mp4",
+            "output": "capture.mp4",
+            "codec": "h264",
+            "width": 1920,
+            "height": 1080,
+            "bit_depth": 8,
+            "chroma": "420",
+            "bitrate": 80_000_000,
+            "fps": None,
+            "audio_codec": "aac",
+            "audio_sample_rate": 48000,
+            "audio_channels": 2,
+        }
+        with mock.patch.object(sys, "argv", ["fruitcap.py", "--split-every", "300", "--split-size", "2g"]):
+            with mock.patch("fruitcap.load_config", return_value=cfg.copy()):
+                with mock.patch("fruitcap.check_camera_permission"):
+                    with mock.patch("fruitcap.Recorder", self.FakeRecorder):
+                        with mock.patch("fruitcap.run_headless"):
+                            fruitcap.main()
+
+        recorder = self.FakeRecorder.instances[0]
+        assert recorder.setup_writer_split_state == (300.0, 2 * 1024**3)
+
+    def test_main_uses_caf_extension_for_audio_only_pcm_defaults(self):
+        cfg = {
+            "audio_only": True,
+            "audio_enabled": True,
+            "container": "mp4",
+            "output": "capture.mp4",
+            "codec": "h264",
+            "width": 1920,
+            "height": 1080,
+            "bit_depth": 8,
+            "chroma": "420",
+            "bitrate": 80_000_000,
+            "fps": None,
+            "audio_codec": "pcm",
+            "audio_bitrate": 256_000,
+            "audio_sample_rate": 48000,
+            "audio_channels": 2,
+        }
+        with mock.patch.object(sys, "argv", ["fruitcap.py", "--audio-only"]):
+            with mock.patch("fruitcap.load_config", return_value=cfg.copy()):
+                with mock.patch("fruitcap.check_microphone_permission", return_value=True):
+                    with mock.patch("fruitcap.Recorder", self.FakeRecorder):
+                        with mock.patch("fruitcap.run_headless"):
+                            fruitcap.main()
+
+        recorder = self.FakeRecorder.instances[0]
+        assert recorder.setup_writer_output == "capture.caf"

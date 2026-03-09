@@ -10,6 +10,7 @@ import ctypes
 import ctypes.util
 import datetime
 import os
+import select
 import signal
 import sys
 import threading
@@ -172,7 +173,9 @@ def load_config(path="fruitcap.cfg", overrides=None):
     overrides is a dict of config keys to override, e.g.:
         {"codec": "h265", "bitrate": "80m", "output": "out.mp4", "fps": "29.97"}
     """
-    config = configparser.ConfigParser()
+    # Disable configparser interpolation so fruitcap's `%d` / `%t`
+    # output filename tokens are read literally.
+    config = configparser.ConfigParser(interpolation=None)
     config.read(path)
 
     # Apply CLI overrides into the config sections
@@ -312,7 +315,7 @@ def load_config(path="fruitcap.cfg", overrides=None):
         "fps": fps,
         "discard_late_frames": discard_late,
         "bitrate": video_bitrate,
-        "output": config.get("capture", "output", fallback="capture.mp4"),
+        "output": config.get("capture", "output", fallback="capture-%d-%t.mp4"),
         "audio_enabled": audio_enabled,
         "audio_codec": audio_codec,
         "audio_bitrate": audio_bitrate,
@@ -381,13 +384,13 @@ def generate_output_path(template, no_overwrite=False):
     """Generate an output file path, expanding %d (date) and %t (time) tokens.
 
     Tokens:
-        %d → YYYY-MM-DD
+        %d → YYYYMMDD
         %t → HHMMSS
 
     If no_overwrite is True and the file exists, appends _1, _2, etc.
     """
     now = datetime.datetime.now()
-    path = template.replace("%d", now.strftime("%Y-%m-%d"))
+    path = template.replace("%d", now.strftime("%Y%m%d"))
     path = path.replace("%t", now.strftime("%H%M%S"))
 
     if not no_overwrite:
@@ -401,6 +404,17 @@ def generate_output_path(template, no_overwrite=False):
     while os.path.exists(f"{base}_{counter}{ext}"):
         counter += 1
     return f"{base}_{counter}{ext}"
+
+
+def get_output_file_type_and_extension(cfg):
+    """Return the AVAssetWriter file type and default extension for cfg."""
+    if cfg["audio_only"]:
+        if cfg["audio_codec"] == "pcm":
+            return AVF.AVFileTypeCoreAudioFormat, ".caf"
+        return AVF.AVFileTypeAppleM4A, ".m4a"
+    if cfg["container"] == "mov":
+        return AVF.AVFileTypeQuickTimeMovie, ".mov"
+    return AVF.AVFileTypeMPEG4, ".mp4"
 
 
 def get_device_formats(device):
@@ -783,12 +797,7 @@ class Recorder:
         output_url = Foundation.NSURL.fileURLWithPath_(
             os.path.abspath(output_path)
         )
-        if self.cfg["audio_only"]:
-            file_type = AVF.AVFileTypeAppleM4A
-        elif self.cfg["container"] == "mov":
-            file_type = AVF.AVFileTypeQuickTimeMovie
-        else:
-            file_type = AVF.AVFileTypeMPEG4
+        file_type, _ = get_output_file_type_and_extension(self.cfg)
         writer, error = AVF.AVAssetWriter.alloc().initWithURL_fileType_error_(
             output_url, file_type, None
         )
@@ -843,6 +852,9 @@ class Recorder:
             return self.cfg["output"]
         return generate_segment_path(self.cfg["output"], segment_num)
 
+    def _current_output_path(self):
+        return self._output_path_for_segment(self._segment_num)
+
     def _start_new_segment(self, timestamp):
         """Finalize current writer and start a new segment."""
         self._finalize_writer()
@@ -864,6 +876,7 @@ class Recorder:
         self.running = True
         self.writer.startWriting()
         self.session.startRunning()
+        output_path = self._current_output_path()
         if self.cfg["audio_only"]:
             audio_codec_labels = {"alac": "ALAC", "pcm": "PCM", "aac": "AAC"}
             audio_codec = audio_codec_labels.get(self.cfg["audio_codec"], self.cfg["audio_codec"])
@@ -871,7 +884,7 @@ class Recorder:
             if self.cfg["audio_codec"] == "aac":
                 bitrate_str = f", {self.cfg['audio_bitrate'] / 1000:.0f} kbps"
             log(
-                f"Recording audio to {self.cfg['output']} "
+                f"Recording audio to {output_path} "
                 f"({audio_codec} "
                 f"{self.cfg['audio_sample_rate'] // 1000}kHz/"
                 f"{self.cfg['audio_channels']}ch"
@@ -895,7 +908,7 @@ class Recorder:
                 )
             bitrate_str = "" if self.cfg["codec"].startswith("prores") else f", {self.cfg['bitrate'] / 1_000_000:.1f} Mbps"
             log(
-                f"Recording to {self.cfg['output']} "
+                f"Recording to {output_path} "
                 f"({self.cfg['width']}x{self.cfg['height']}, "
                 f"{codec_label}, {self.cfg['bit_depth']}-bit {self.cfg['chroma']}"
                 f"{bitrate_str}"
@@ -938,7 +951,7 @@ class Recorder:
             if self._splitting_enabled() and self._segment_num > 1:
                 log(f"\nRecording stopped. {hours:02d}:{minutes:02d}:{seconds:02d} across {self._segment_num} segments")
             else:
-                log(f"\nRecording stopped. {hours:02d}:{minutes:02d}:{seconds:02d} to {self.cfg['output']}")
+                log(f"\nRecording stopped. {hours:02d}:{minutes:02d}:{seconds:02d} to {self._current_output_path()}")
         else:
             dropped_msg = f", {self.frames_dropped} dropped" if self.frames_dropped else ""
             if self._splitting_enabled() and self._segment_num > 1:
@@ -949,7 +962,7 @@ class Recorder:
             else:
                 log(
                     f"\nRecording stopped. {self.frames_written} frames written"
-                    f"{dropped_msg} to {self.cfg['output']}"
+                    f"{dropped_msg} to {self._current_output_path()}"
                 )
 
     def handle_video_sample_buffer(self, sample_buffer):
@@ -1083,7 +1096,7 @@ class Recorder:
         minutes, seconds = divmod(int(elapsed), 60)
         hours, minutes = divmod(minutes, 60)
 
-        output_path = self.cfg["output"]
+        output_path = self._current_output_path()
         try:
             size_bytes = os.path.getsize(output_path)
         except OSError:
@@ -1113,7 +1126,7 @@ class Recorder:
         minutes, seconds = divmod(int(elapsed), 60)
         hours, minutes = divmod(minutes, 60)
 
-        output_path = self.cfg["output"]
+        output_path = self._current_output_path()
         try:
             size_bytes = os.path.getsize(output_path)
         except OSError:
@@ -1411,23 +1424,27 @@ def run_headless(recorder):
     """Run capture in headless (no preview) mode with signal handling."""
     signal.signal(signal.SIGTERM, lambda *_: recorder.stop())
     signal.signal(signal.SIGINT, lambda *_: recorder.stop())
-    try:
-        while recorder.running:
-            line = input()
-            if line.strip().lower() == "q":
-                break
-    except (KeyboardInterrupt, EOFError):
-        pass
+    if sys.stdin.isatty():
+        try:
+            while recorder.running:
+                ready, _, _ = select.select([sys.stdin], [], [], 0.25)
+                if not ready:
+                    continue
+                line = sys.stdin.readline()
+                if line == "" or line.strip().lower() == "q":
+                    break
+        except (KeyboardInterrupt, EOFError):
+            pass
+    else:
+        try:
+            while recorder.running:
+                time.sleep(0.25)
+        except KeyboardInterrupt:
+            pass
     recorder.stop()
 
 
-def main():
-    banner = (
-        "fruitcap.py\n"
-        "Copyright (c) 2026 Phil Jensen <philj@philandamy.org>\n"
-        "All rights reserved.\n"
-    )
-    print(banner)
+def build_parser():
     parser = argparse.ArgumentParser(
         description="macOS video/audio capture tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1474,11 +1491,42 @@ def main():
         help="Color space tagging (default: bt709)",
     )
     parser.add_argument(
+        "--discard-late-frames",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Drop late video frames if capture falls behind",
+    )
+    parser.add_argument(
         "--list-devices", action="store_true",
         help="List available video and audio devices and exit",
     )
     parser.add_argument("--device", metavar="NAME_OR_INDEX", help="Video device name or index")
     parser.add_argument("--audio-device", metavar="NAME_OR_INDEX", help="Audio device name or index")
+    parser.add_argument(
+        "--audio-codec",
+        dest="audio_codec",
+        choices=["aac", "alac", "pcm"],
+        help="Audio codec",
+    )
+    parser.add_argument(
+        "--audio-bitrate",
+        dest="audio_bitrate",
+        help="Audio bitrate for AAC (e.g., 256k, 320000)",
+    )
+    parser.add_argument(
+        "--audio-sample-rate",
+        dest="audio_sample_rate",
+        type=int,
+        metavar="HZ",
+        help="Audio sample rate in Hz",
+    )
+    parser.add_argument(
+        "--audio-channels",
+        dest="audio_channels",
+        type=int,
+        metavar="N",
+        help="Audio channel count",
+    )
     parser.add_argument(
         "--no-overwrite", action="store_true",
         help="Don't overwrite existing files; append _1, _2, etc.",
@@ -1503,6 +1551,52 @@ def main():
         "--split-size", metavar="SIZE",
         help="Split recording when file reaches this size (e.g., 500m, 2g)",
     )
+    return parser
+
+
+def build_overrides_from_args(args):
+    """Build config overrides from parsed CLI args."""
+    overrides = {}
+    option_names = (
+        "codec", "container", "bitrate", "resolution", "fps", "output",
+        "chroma", "bit_depth", "color_space", "audio_codec", "audio_bitrate",
+        "audio_sample_rate", "audio_channels",
+    )
+    for name in option_names:
+        value = getattr(args, name)
+        if value is not None:
+            overrides[name] = value
+    if args.audio_only:
+        overrides["audio_only"] = True
+    if args.discard_late_frames is not None:
+        overrides["discard_late_frames"] = args.discard_late_frames
+    return overrides
+
+
+def apply_runtime_options(recorder, args, audio_only=False):
+    """Apply runtime stop/split options to a recorder before setup_writer()."""
+    if not audio_only and args.frames:
+        recorder.max_frames = args.frames
+    if args.time:
+        recorder.max_seconds = args.time
+    if args.split_every:
+        recorder.split_seconds = args.split_every
+    if args.split_size:
+        try:
+            recorder.split_size_bytes = parse_size(args.split_size)
+        except ValueError:
+            print(f"Error: Invalid split size '{args.split_size}'. Use a number or shorthand like '500m', '2g'.")
+            sys.exit(1)
+
+
+def main():
+    banner = (
+        "fruitcap.py\n"
+        "Copyright (c) 2026 Phil Jensen <philj@philandamy.org>\n"
+        "All rights reserved.\n"
+    )
+    print(banner)
+    parser = build_parser()
     args = parser.parse_args()
 
     if args.preview_both:
@@ -1512,40 +1606,13 @@ def main():
     global _quiet
     _quiet = args.quiet
 
-    # Build overrides dict from CLI args
-    overrides = {}
-    if args.audio_only:
-        overrides["audio_only"] = True
-    if args.codec:
-        overrides["codec"] = args.codec
-    if args.container:
-        overrides["container"] = args.container
-    if args.bitrate:
-        overrides["bitrate"] = args.bitrate
-    if args.resolution:
-        overrides["resolution"] = args.resolution
-    if args.fps:
-        overrides["fps"] = args.fps
-    if args.output:
-        overrides["output"] = args.output
-    if args.chroma:
-        overrides["chroma"] = args.chroma
-    if args.bit_depth:
-        overrides["bit_depth"] = args.bit_depth
-    if args.color_space:
-        overrides["color_space"] = args.color_space
-
+    overrides = build_overrides_from_args(args)
     cfg = load_config(args.config, overrides=overrides or None)
 
     # If user didn't explicitly set output, match extension to container/mode
     if not args.output:
         base, ext = os.path.splitext(cfg["output"])
-        if cfg["audio_only"]:
-            expected_ext = ".m4a"
-        elif cfg["container"] == "mov":
-            expected_ext = ".mov"
-        else:
-            expected_ext = ".mp4"
+        _, expected_ext = get_output_file_type_and_extension(cfg)
         if ext.lower() != expected_ext:
             cfg["output"] = base + expected_ext
 
@@ -1582,6 +1649,7 @@ def main():
             sys.exit(1)
         cfg["audio_enabled"] = True
         recorder = Recorder(cfg)
+        apply_runtime_options(recorder, args, audio_only=True)
         audio_device = recorder.find_audio_device(args.audio_device)
         if not audio_device:
             print("Error: No audio capture devices found.")
@@ -1599,6 +1667,7 @@ def main():
                 cfg["audio_enabled"] = False
 
         recorder = Recorder(cfg)
+        apply_runtime_options(recorder, args)
         device = recorder.find_device(args.device)
         audio_device = recorder.find_audio_device(args.audio_device) if cfg["audio_enabled"] else None
         recorder.setup_session(device, audio_device)
@@ -1610,20 +1679,6 @@ def main():
                 recorder.compressed_preview = cp
             else:
                 print("Warning: Compressed preview unavailable, continuing without it.")
-
-        if args.frames:
-            recorder.max_frames = args.frames
-
-    if args.time:
-        recorder.max_seconds = args.time
-    if args.split_every:
-        recorder.split_seconds = args.split_every
-    if args.split_size:
-        try:
-            recorder.split_size_bytes = parse_size(args.split_size)
-        except ValueError:
-            print(f"Error: Invalid split size '{args.split_size}'. Use a number or shorthand like '500m', '2g'.")
-            sys.exit(1)
 
     recorder.start()
 

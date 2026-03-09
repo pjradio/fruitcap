@@ -607,6 +607,8 @@ class Recorder:
         self._segment_num = 1
         self._segment_start_timestamp = None
         self._segment_paths = []
+        self._finalization_lock = threading.Lock()
+        self._pending_finalizations = []
 
     def find_device(self, selector=None):
         devices = get_devices(AVF.AVMediaTypeVideo)
@@ -859,16 +861,45 @@ class Recorder:
 
         return writer, writer_input, audio_writer_input
 
-    def _finalize_writer(self):
-        """Finalize the current writer synchronously."""
-        if self.writer and self.writer.status() == AVF.AVAssetWriterStatusWriting:
-            if self.writer_input:
-                self.writer_input.markAsFinished()
-            if self.audio_writer_input:
-                self.audio_writer_input.markAsFinished()
+    def _finalize_writer_state(self, writer, writer_input=None, audio_writer_input=None, output_path=None):
+        """Finalize a writer/input set synchronously."""
+        if writer and writer.status() == AVF.AVAssetWriterStatusWriting:
+            if writer_input:
+                writer_input.markAsFinished()
+            if audio_writer_input:
+                audio_writer_input.markAsFinished()
             done = threading.Event()
-            self.writer.finishWritingWithCompletionHandler_(lambda: done.set())
-            done.wait(timeout=10)
+            writer.finishWritingWithCompletionHandler_(lambda: done.set())
+            if not done.wait(timeout=10):
+                label = f" '{output_path}'" if output_path else ""
+                print(f"\nWarning: Timed out finalizing output file{label}.")
+
+    def _queue_writer_finalization(self, writer, writer_input=None, audio_writer_input=None, output_path=None):
+        """Finalize a completed segment on a background thread."""
+        if writer is None:
+            return
+
+        def worker():
+            self._finalize_writer_state(
+                writer,
+                writer_input=writer_input,
+                audio_writer_input=audio_writer_input,
+                output_path=output_path,
+            )
+
+        thread = threading.Thread(target=worker, daemon=True)
+        with self._finalization_lock:
+            self._pending_finalizations = [t for t in self._pending_finalizations if t.is_alive()]
+            self._pending_finalizations.append(thread)
+        thread.start()
+
+    def _wait_for_pending_finalizations(self):
+        """Wait for any in-flight segment finalizers to complete."""
+        with self._finalization_lock:
+            pending = self._pending_finalizations
+            self._pending_finalizations = []
+        for thread in pending:
+            thread.join()
 
     def _splitting_enabled(self):
         return self.split_seconds is not None or self.split_size_bytes is not None
@@ -882,8 +913,14 @@ class Recorder:
         return self._output_path_for_segment(self._segment_num)
 
     def _start_new_segment(self, timestamp):
-        """Finalize current writer and start a new segment."""
-        self._finalize_writer()
+        """Swap in a new current segment and return the old writer state."""
+        old_output_path = self._current_output_path()
+        old_state = (
+            self.writer,
+            self.writer_input,
+            self.audio_writer_input,
+            old_output_path,
+        )
         self._segment_num += 1
         new_path = self._output_path_for_segment(self._segment_num)
         self._segment_paths.append(new_path)
@@ -892,6 +929,7 @@ class Recorder:
         self.writer.startSessionAtSourceTime_(timestamp)
         self._segment_start_timestamp = timestamp
         log(f"  Started segment {self._segment_num}: {new_path}")
+        return old_state
 
     def setup_writer(self):
         output_path = self._output_path_for_segment(self._segment_num) if self._splitting_enabled() else self.cfg["output"]
@@ -960,15 +998,30 @@ class Recorder:
             self._trigger_stop()
 
     def stop(self):
-        if not self.running:
-            return
-        self.running = False
+        with self.lock:
+            if not self.running:
+                return
+            self.running = False
         if hasattr(self, "_signal_watchdog"):
             self._signal_watchdog.cancel()
         if self.compressed_preview:
             self.compressed_preview.invalidate()
         self.session.stopRunning()
-        self._finalize_writer()
+        with self.lock:
+            writer = self.writer
+            writer_input = self.writer_input
+            audio_writer_input = self.audio_writer_input
+            output_path = self._current_output_path()
+            self.writer = None
+            self.writer_input = None
+            self.audio_writer_input = None
+        self._finalize_writer_state(
+            writer,
+            writer_input=writer_input,
+            audio_writer_input=audio_writer_input,
+            output_path=output_path,
+        )
+        self._wait_for_pending_finalizations()
 
         if self.cfg["audio_only"]:
             elapsed = time.monotonic() - self.start_time if self.start_time else 0
@@ -998,7 +1051,10 @@ class Recorder:
         if not CoreMedia.CMSampleBufferDataIsReady(sample_buffer):
             return
 
+        stop_requested = False
         with self.lock:
+            if not self.running or not self.writer or not self.writer_input:
+                return
             if self.writer.status() == AVF.AVAssetWriterStatusWriting:
                 timestamp = CoreMedia.CMSampleBufferGetPresentationTimeStamp(
                     sample_buffer
@@ -1036,16 +1092,24 @@ class Recorder:
                             except OSError:
                                 pass
                         if need_split:
-                            self._start_new_segment(timestamp)
+                            old_state = self._start_new_segment(timestamp)
+                            self._queue_writer_finalization(
+                                old_state[0],
+                                writer_input=old_state[1],
+                                audio_writer_input=old_state[2],
+                                output_path=old_state[3],
+                            )
 
                     if self.max_frames and self.frames_written >= self.max_frames:
-                        self._trigger_stop()
+                        stop_requested = True
                     elif self.max_seconds:
                         elapsed = CoreMedia.CMTimeGetSeconds(
                             CoreMedia.CMTimeSubtract(timestamp, self._start_timestamp)
                         )
                         if elapsed >= self.max_seconds:
-                            self._trigger_stop()
+                            stop_requested = True
+        if stop_requested:
+            self._trigger_stop()
 
     def handle_audio_sample_buffer(self, sample_buffer):
         if not self.running or not self.audio_writer_input:
@@ -1054,7 +1118,10 @@ class Recorder:
         if not CoreMedia.CMSampleBufferDataIsReady(sample_buffer):
             return
 
+        stop_requested = False
         with self.lock:
+            if not self.running or not self.writer or not self.audio_writer_input:
+                return
             if self.writer.status() == AVF.AVAssetWriterStatusWriting:
                 # In audio-only mode, start the session from the first audio buffer
                 if self.cfg["audio_only"] and not self.started_writing.is_set():
@@ -1085,7 +1152,7 @@ class Recorder:
                                 CoreMedia.CMTimeSubtract(timestamp, self._start_timestamp)
                             )
                             if elapsed >= self.max_seconds:
-                                self._trigger_stop()
+                                stop_requested = True
 
                         # Check segment split conditions
                         if self._splitting_enabled():
@@ -1112,7 +1179,15 @@ class Recorder:
                                 timestamp = CoreMedia.CMSampleBufferGetPresentationTimeStamp(
                                     sample_buffer
                                 )
-                                self._start_new_segment(timestamp)
+                                old_state = self._start_new_segment(timestamp)
+                                self._queue_writer_finalization(
+                                    old_state[0],
+                                    writer_input=old_state[1],
+                                    audio_writer_input=old_state[2],
+                                    output_path=old_state[3],
+                                )
+        if stop_requested:
+            self._trigger_stop()
 
 
     def _update_status(self):

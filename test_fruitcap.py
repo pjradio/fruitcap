@@ -7,7 +7,9 @@ import os
 import signal
 import sys
 import tempfile
+import threading
 import textwrap
+import time
 from argparse import Namespace
 from unittest import mock
 
@@ -612,6 +614,104 @@ class TestSegmentPath:
         r.split_seconds = 60
         assert r._output_path_for_segment(1) == "test_001.mp4"
         assert r._output_path_for_segment(2) == "test_002.mp4"
+
+
+class TestSegmentRollover:
+    class FakeInput:
+        def __init__(self):
+            self.append_count = 0
+
+        def isReadyForMoreMediaData(self):
+            return True
+
+        def appendSampleBuffer_(self, sample_buffer):
+            self.append_count += 1
+
+        def markAsFinished(self):
+            return None
+
+    class FakeWriter:
+        def __init__(self):
+            self.started = False
+            self.session_timestamp = None
+
+        def status(self):
+            return fruitcap.AVF.AVAssetWriterStatusWriting
+
+        def finishWritingWithCompletionHandler_(self, callback):
+            callback()
+
+        def startWriting(self):
+            self.started = True
+
+        def startSessionAtSourceTime_(self, timestamp):
+            self.session_timestamp = timestamp
+
+    def test_rollover_finalizes_previous_segment_off_lock(self):
+        cfg = {
+            "audio_only": False,
+            "audio_enabled": True,
+            "container": "mp4",
+            "output": "capture.mp4",
+            "codec": "h264",
+            "width": 1920,
+            "height": 1080,
+            "bit_depth": 8,
+            "chroma": "420",
+            "bitrate": 80_000_000,
+            "fps": None,
+            "discard_late_frames": False,
+            "color_space": "bt709",
+            "audio_codec": "aac",
+            "audio_bitrate": 256_000,
+            "audio_sample_rate": 48000,
+            "audio_channels": 2,
+        }
+        recorder = fruitcap.Recorder(cfg)
+        recorder.running = True
+        recorder.started_writing.set()
+        recorder.start_time = time.monotonic()
+        recorder.writer = self.FakeWriter()
+        recorder.writer_input = self.FakeInput()
+        recorder.audio_writer_input = self.FakeInput()
+        recorder.split_size_bytes = 1
+        recorder._segment_start_timestamp = "seg-start"
+
+        next_writer = self.FakeWriter()
+        next_video_input = self.FakeInput()
+        next_audio_input = self.FakeInput()
+        recorder._create_writer = mock.Mock(
+            return_value=(next_writer, next_video_input, next_audio_input)
+        )
+
+        finalization_started = threading.Event()
+        allow_finalization = threading.Event()
+
+        def fake_finalize(writer, writer_input=None, audio_writer_input=None, output_path=None):
+            finalization_started.set()
+            allow_finalization.wait(timeout=1)
+
+        with mock.patch.object(recorder, "_finalize_writer_state", side_effect=fake_finalize):
+            with mock.patch.object(recorder, "_update_status"):
+                with mock.patch("fruitcap.CoreMedia.CMSampleBufferDataIsReady", return_value=True):
+                    with mock.patch(
+                        "fruitcap.CoreMedia.CMSampleBufferGetPresentationTimeStamp",
+                        return_value="ts",
+                    ):
+                        with mock.patch("fruitcap.os.path.getsize", return_value=1):
+                            recorder.handle_video_sample_buffer(object())
+
+                            assert finalization_started.wait(0.2)
+                            assert recorder._segment_num == 2
+                            assert recorder.writer is next_writer
+                            assert next_writer.started is True
+                            assert next_writer.session_timestamp == "ts"
+
+                            recorder.handle_audio_sample_buffer(object())
+                            assert next_audio_input.append_count == 1
+
+            allow_finalization.set()
+            recorder._wait_for_pending_finalizations()
 
 
 # ── Audio-only mode ──

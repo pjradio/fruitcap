@@ -681,8 +681,14 @@ class TestOutputFileType:
 
 
 class TestWriterMetadata:
-    def test_mp4_uses_quicktime_software_identifier(self):
+    def test_mp4_uses_itunes_encoding_tool_identifier(self):
         metadata = fruitcap.build_writer_metadata(fruitcap.AVF.AVFileTypeMPEG4)
+        assert len(metadata) == 1
+        assert metadata[0].identifier() == fruitcap.AVF.AVMetadataIdentifieriTunesMetadataEncodingTool
+        assert metadata[0].value() == "fruitcap.py"
+
+    def test_mov_uses_quicktime_software_identifier(self):
+        metadata = fruitcap.build_writer_metadata(fruitcap.AVF.AVFileTypeQuickTimeMovie)
         assert len(metadata) == 1
         assert metadata[0].identifier() == fruitcap.AVF.AVMetadataIdentifierQuickTimeMetadataSoftware
         assert metadata[0].value() == "fruitcap.py"

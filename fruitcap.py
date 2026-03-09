@@ -420,11 +420,9 @@ def get_output_file_type_and_extension(cfg):
 def build_writer_metadata(file_type):
     """Return writer metadata items describing the authoring software."""
     item = AVF.AVMutableMetadataItem.alloc().init()
-    if file_type in (
-        AVF.AVFileTypeMPEG4,
-        AVF.AVFileTypeQuickTimeMovie,
-        AVF.AVFileTypeAppleM4A,
-    ):
+    if file_type in (AVF.AVFileTypeMPEG4, AVF.AVFileTypeAppleM4A):
+        item.setIdentifier_(AVF.AVMetadataIdentifieriTunesMetadataEncodingTool)
+    elif file_type == AVF.AVFileTypeQuickTimeMovie:
         item.setIdentifier_(AVF.AVMetadataIdentifierQuickTimeMetadataSoftware)
     else:
         item.setIdentifier_(AVF.AVMetadataCommonIdentifierSoftware)

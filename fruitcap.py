@@ -627,6 +627,7 @@ class Recorder:
     def __init__(self, cfg):
         self.cfg = cfg
         self.session = None
+        self._session_owned = True
         self.writer = None
         self.writer_input = None
         self.audio_writer_input = None
@@ -682,6 +683,7 @@ class Recorder:
 
     def setup_session(self, device=None, audio_device=None):
         self.session = AVF.AVCaptureSession.alloc().init()
+        self._session_owned = True
 
         # Set up delegate
         self._delegate = SampleBufferDelegate.alloc().init()
@@ -772,6 +774,17 @@ class Recorder:
                     self.session.addOutput_(audio_output)
                 else:
                     print("Warning: Could not add audio output to session.")
+
+    def adopt_session(self, session, delegate):
+        """Adopt an externally-managed session and delegate for recording.
+
+        The caller is responsible for session lifecycle (start/stop).
+        The recorder only manages the writer and buffer handling.
+        """
+        self.session = session
+        self._session_owned = False
+        self._delegate = delegate
+        self._delegate.recorder = self
 
     def _get_output_settings(self):
         """Build and cache video/audio output settings for writer setup."""
@@ -1062,7 +1075,8 @@ class Recorder:
             self.running = False
             sys.exit(1)
         self.running = True
-        self.session.startRunning()
+        if self._session_owned:
+            self.session.startRunning()
         if self.cfg["audio_only"]:
             audio_codec_labels = {"alac": "ALAC", "pcm": "PCM", "aac": "AAC"}
             audio_codec = audio_codec_labels.get(self.cfg["audio_codec"], self.cfg["audio_codec"])
@@ -1128,7 +1142,11 @@ class Recorder:
             self._signal_watchdog.cancel()
         if self.compressed_preview:
             self.compressed_preview.invalidate()
-        self.session.stopRunning()
+        if self._session_owned:
+            self.session.stopRunning()
+        elif self._delegate:
+            # Disconnect so buffers stop flowing to this recorder
+            self._delegate.recorder = None
         with self.lock:
             writer = self.writer
             writer_input = self.writer_input

@@ -1110,6 +1110,112 @@ class TestRunHeadless:
         assert recorder.stop_calls == 1
 
 
+class TestAdoptSession:
+    """Tests for Recorder.adopt_session() used by the GUI for seamless preview→recording."""
+
+    def _make_cfg(self, **overrides):
+        defaults = {
+            "codec": "h264", "width": 1920, "height": 1080,
+            "bit_depth": 8, "chroma": "420", "bitrate": 80_000_000,
+            "fps": None, "container": "mp4", "output": "test.mp4",
+            "audio_enabled": True, "audio_codec": "aac",
+            "audio_bitrate": 256_000, "audio_sample_rate": 48000,
+            "audio_channels": 2, "color_space": "bt709",
+            "discard_late_frames": True, "audio_only": False,
+        }
+        defaults.update(overrides)
+        return defaults
+
+    def test_adopt_session_sets_session_and_delegate(self):
+        recorder = fruitcap.Recorder(self._make_cfg())
+        fake_session = mock.MagicMock()
+        fake_delegate = mock.MagicMock()
+
+        recorder.adopt_session(fake_session, fake_delegate)
+
+        assert recorder.session is fake_session
+        assert recorder._delegate is fake_delegate
+        assert fake_delegate.recorder is recorder
+
+    def test_adopt_session_marks_session_not_owned(self):
+        recorder = fruitcap.Recorder(self._make_cfg())
+        recorder.adopt_session(mock.MagicMock(), mock.MagicMock())
+
+        assert recorder._session_owned is False
+
+    def test_start_skips_startRunning_when_session_not_owned(self):
+        recorder = fruitcap.Recorder(self._make_cfg())
+        fake_session = mock.MagicMock()
+        fake_delegate = mock.MagicMock()
+        recorder.adopt_session(fake_session, fake_delegate)
+
+        # Mock the writer so start() succeeds
+        recorder.writer = mock.MagicMock()
+        recorder.writer_input = mock.MagicMock()
+        with mock.patch.object(recorder, "_start_writer", return_value=True):
+            recorder.start()
+
+        fake_session.startRunning.assert_not_called()
+        assert recorder.running is True
+
+    def test_start_calls_startRunning_when_session_owned(self):
+        recorder = fruitcap.Recorder(self._make_cfg())
+        fake_session = mock.MagicMock()
+        recorder.session = fake_session
+        recorder._session_owned = True
+
+        recorder.writer = mock.MagicMock()
+        recorder.writer_input = mock.MagicMock()
+        with mock.patch.object(recorder, "_start_writer", return_value=True):
+            recorder.start()
+
+        fake_session.startRunning.assert_called_once()
+
+    def test_stop_skips_stopRunning_when_session_not_owned(self):
+        recorder = fruitcap.Recorder(self._make_cfg())
+        fake_session = mock.MagicMock()
+        fake_delegate = mock.MagicMock()
+        recorder.adopt_session(fake_session, fake_delegate)
+        recorder.running = True
+
+        with mock.patch.object(recorder, "_finalize_writer_state"):
+            with mock.patch.object(recorder, "_wait_for_pending_finalizations"):
+                recorder.stop()
+
+        fake_session.stopRunning.assert_not_called()
+
+    def test_stop_disconnects_delegate_when_session_not_owned(self):
+        recorder = fruitcap.Recorder(self._make_cfg())
+        fake_session = mock.MagicMock()
+        fake_delegate = mock.MagicMock()
+        recorder.adopt_session(fake_session, fake_delegate)
+        recorder.running = True
+
+        with mock.patch.object(recorder, "_finalize_writer_state"):
+            with mock.patch.object(recorder, "_wait_for_pending_finalizations"):
+                recorder.stop()
+
+        # Delegate should be disconnected so buffers stop flowing
+        assert fake_delegate.recorder is None
+
+    def test_stop_calls_stopRunning_when_session_owned(self):
+        recorder = fruitcap.Recorder(self._make_cfg())
+        fake_session = mock.MagicMock()
+        recorder.session = fake_session
+        recorder._session_owned = True
+        recorder.running = True
+
+        with mock.patch.object(recorder, "_finalize_writer_state"):
+            with mock.patch.object(recorder, "_wait_for_pending_finalizations"):
+                recorder.stop()
+
+        fake_session.stopRunning.assert_called_once()
+
+    def test_session_owned_true_by_default(self):
+        recorder = fruitcap.Recorder(self._make_cfg())
+        assert recorder._session_owned is True
+
+
 class TestMainRuntimeConfiguration:
     class FakeRecorder:
         instances = []

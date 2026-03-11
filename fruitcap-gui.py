@@ -30,6 +30,7 @@ from fruitcap import (
     get_output_file_type_and_extension,
     get_devices, list_devices, find_device_by_selector,
     check_camera_permission, check_microphone_permission,
+    dispatch_queue_create,
     RESOLUTION_PRESETS, COLOR_SPACE_PRESETS,
 )
 
@@ -80,6 +81,7 @@ class FruitcapGUI(QMainWindow):
 
         self._recorder = None
         self._session = None
+        self._delegate = None
         self._recording = False
         self._previewing = False
         self._status_signal = StatusSignal()
@@ -362,7 +364,12 @@ class FruitcapGUI(QMainWindow):
         return cfg
 
     def _start_preview(self):
-        """Start a preview-only capture session (no recording)."""
+        """Start a capture session with preview and data outputs pre-configured.
+
+        Data outputs and delegate are set up now so that transitioning to
+        recording only requires creating a writer — no session reconfiguration,
+        so the preview stays seamless.
+        """
         device = self._get_selected_video_device()
         if not device:
             self._statusbar.showMessage("No video device selected")
@@ -381,16 +388,49 @@ class FruitcapGUI(QMainWindow):
         if self._session.canAddInput_(dev_input):
             self._session.addInput_(dev_input)
 
+        # Set up delegate and video data output (buffers are discarded
+        # until a recorder is attached via delegate.recorder)
+        self._delegate = SampleBufferDelegate.alloc().init()
+
+        video_output = AVF.AVCaptureVideoDataOutput.alloc().init()
+        video_output.setAlwaysDiscardsLateVideoFrames_(True)
+        video_queue = dispatch_queue_create(b"fruitcap.videoQueue")
+        video_queue_obj = objc.objc_object(c_void_p=video_queue)
+        self._delegate.video_output = video_output
+        video_output.setSampleBufferDelegate_queue_(self._delegate, video_queue_obj)
+
+        if self._session.canAddOutput_(video_output):
+            self._session.addOutput_(video_output)
+
+        # Set up audio input and output
+        audio_device = self._get_selected_audio_device()
+        if audio_device:
+            audio_input, error = AVF.AVCaptureDeviceInput.deviceInputWithDevice_error_(
+                audio_device, None
+            )
+            if audio_input and self._session.canAddInput_(audio_input):
+                self._session.addInput_(audio_input)
+
+                audio_output = AVF.AVCaptureAudioDataOutput.alloc().init()
+                audio_queue = dispatch_queue_create(b"fruitcap.audioQueue")
+                audio_queue_obj = objc.objc_object(c_void_p=audio_queue)
+                self._delegate.audio_output = audio_output
+                audio_output.setSampleBufferDelegate_queue_(self._delegate, audio_queue_obj)
+
+                if self._session.canAddOutput_(audio_output):
+                    self._session.addOutput_(audio_output)
+
         self._preview_widget.attach_session(self._session)
         self._session.startRunning()
         self._previewing = True
         self._statusbar.showMessage(f"Preview: {device.localizedName()}")
 
     def _stop_preview(self):
-        """Stop the preview-only session."""
+        """Stop the preview session and tear down all outputs."""
         if self._session and self._previewing:
             self._session.stopRunning()
             self._session = None
+            self._delegate = None
             self._previewing = False
 
     def _toggle_recording(self):
@@ -400,32 +440,27 @@ class FruitcapGUI(QMainWindow):
             self._start_recording()
 
     def _start_recording(self):
-        """Build config, create recorder, and start recording."""
-        # Stop preview session — the recorder creates its own
-        self._stop_preview()
+        """Build config, adopt the live session, and start recording.
+
+        The session and data outputs are already running from preview,
+        so we just create a writer and point the delegate at the recorder.
+        No session reconfiguration means no preview interruption.
+        """
+        if not self._session or not self._previewing:
+            self._statusbar.showMessage("No active preview session")
+            return
 
         try:
             cfg = self._build_config()
         except (ValueError, SystemExit) as e:
             self._statusbar.showMessage(f"Config error: {e}")
-            self._start_preview()
             return
 
         self._recorder = Recorder(cfg)
 
-        device = self._get_selected_video_device()
-        audio_device = self._get_selected_audio_device()
-
-        if not device:
-            self._statusbar.showMessage("No video device selected")
-            self._start_preview()
-            return
-
-        self._recorder.setup_session(device, audio_device)
+        # Adopt the running session — no reconfiguration needed
+        self._recorder.adopt_session(self._session, self._delegate)
         self._recorder.setup_writer()
-
-        # Attach preview to the recorder's session
-        self._preview_widget.attach_session(self._recorder.session)
 
         # Set up stop callback that signals the main thread
         def on_stop():
@@ -459,7 +494,11 @@ class FruitcapGUI(QMainWindow):
         self._statusbar.showMessage("Stopping...")
 
     def _on_recording_stopped(self):
-        """Called on the main thread when recording finishes."""
+        """Called on the main thread when recording finishes.
+
+        The session is still running (recorder didn't own it), so the
+        preview continues uninterrupted.
+        """
         if self._recorder:
             frames = self._recorder.frames_written
             dropped = self._recorder.frames_dropped
@@ -472,12 +511,13 @@ class FruitcapGUI(QMainWindow):
             self._recorder = None
 
         self._recording = False
+        self._previewing = self._session is not None and self._session.isRunning()
         self._record_btn.setText("Start Recording")
         self._record_btn.setStyleSheet("")
         self._set_settings_enabled(True)
 
-        # Restart preview
-        QTimer.singleShot(200, self._start_preview)
+        if not self._previewing:
+            QTimer.singleShot(200, self._start_preview)
 
     def _poll_status(self):
         """Update status bar with recording stats."""
@@ -525,6 +565,16 @@ class FruitcapGUI(QMainWindow):
             self._output_edit,
         ):
             widget.setEnabled(enabled)
+
+    def keyPressEvent(self, event):
+        """Handle keyboard shortcuts: Esc stops recording, Q quits."""
+        key = event.key()
+        if key == Qt.Key_Escape and self._recording:
+            self._stop_recording()
+        elif key == Qt.Key_Q and not isinstance(self.focusWidget(), QLineEdit):
+            self.close()
+        else:
+            super().keyPressEvent(event)
 
     def mousePressEvent(self, event):
         """Clear focus from editable fields when clicking elsewhere."""

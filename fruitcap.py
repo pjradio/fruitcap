@@ -282,6 +282,11 @@ def load_config(path="fruitcap.cfg", overrides=None):
         bit_depth = 10
         chroma = "422"
 
+    # Apple's H.264 hardware encoder only supports 4:2:0
+    if codec == "h264" and chroma == "422":
+        print("Error: H.264 only supports 4:2:0 chroma on Apple hardware. Use h265 or prores for 4:2:2.")
+        sys.exit(1)
+
     fps = config.get("capture", "fps", fallback="").strip()
     if fps:
         try:

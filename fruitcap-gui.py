@@ -267,10 +267,11 @@ class FruitcapGUI(QMainWindow):
             self._chroma_combo.setEnabled(False)
             self._container_combo.setCurrentText("mov")
         elif codec == "h264":
-            # H.264 only supports 8-bit
+            # H.264 only supports 8-bit 4:2:0 on Apple's hardware encoder
             self._bit_depth_combo.setCurrentText("8")
             self._bit_depth_combo.setEnabled(False)
-            self._chroma_combo.setEnabled(True)
+            self._chroma_combo.setCurrentText("420")
+            self._chroma_combo.setEnabled(False)
         else:
             # h265 supports both 8 and 10-bit
             self._bit_depth_combo.setEnabled(True)

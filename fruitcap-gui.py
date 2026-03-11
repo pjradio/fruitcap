@@ -90,6 +90,7 @@ class FruitcapGUI(QMainWindow):
 
         # Apply initial codec constraints (h264 default = 8-bit only)
         self._on_codec_changed(self._codec_combo.currentText())
+        self._on_audio_codec_changed(self._audio_codec_combo.currentText())
 
         # Remove initial focus from editable fields
         self._preview_widget.setFocus()
@@ -180,10 +181,12 @@ class FruitcapGUI(QMainWindow):
 
         self._audio_codec_combo = QComboBox()
         self._audio_codec_combo.addItems(["aac", "alac", "pcm"])
+        self._audio_codec_combo.currentTextChanged.connect(self._on_audio_codec_changed)
         audio_form.addRow("Codec:", self._audio_codec_combo)
 
+        self._audio_bitrate_label = QLabel("Bitrate:")
         self._audio_bitrate_edit = QLineEdit("256k")
-        audio_form.addRow("Bitrate:", self._audio_bitrate_edit)
+        audio_form.addRow(self._audio_bitrate_label, self._audio_bitrate_edit)
 
         self._audio_sample_rate_combo = QComboBox()
         self._audio_sample_rate_combo.addItems(["48000", "44100", "96000"])
@@ -266,6 +269,7 @@ class FruitcapGUI(QMainWindow):
             self._bit_depth_combo.setEnabled(False)
             self._chroma_combo.setEnabled(False)
             self._container_combo.setCurrentText("mov")
+            self._audio_codec_combo.setCurrentText("pcm")
         elif codec == "h264":
             # H.264 only supports 8-bit 4:2:0 on Apple's hardware encoder
             self._bit_depth_combo.setCurrentText("8")
@@ -276,6 +280,12 @@ class FruitcapGUI(QMainWindow):
             # h265 supports both 8 and 10-bit
             self._bit_depth_combo.setEnabled(True)
             self._chroma_combo.setEnabled(True)
+
+    def _on_audio_codec_changed(self, audio_codec):
+        """Show/hide audio bitrate (only relevant for AAC)."""
+        show_bitrate = (audio_codec == "aac")
+        self._audio_bitrate_label.setVisible(show_bitrate)
+        self._audio_bitrate_edit.setVisible(show_bitrate)
 
     def _get_selected_video_device(self):
         idx = self._video_device_combo.currentData()

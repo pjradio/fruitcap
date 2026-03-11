@@ -41,6 +41,7 @@ class PreviewWidget(QWidget):
         super().__init__(parent)
         self._preview_layer = None
         self.setAttribute(Qt.WA_NativeWindow, True)
+        self.setFocusPolicy(Qt.ClickFocus)
         self.setMinimumSize(320, 180)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
@@ -75,7 +76,7 @@ class FruitcapGUI(QMainWindow):
         super().__init__()
         self.setWindowTitle("fruitcap")
         self.setMinimumSize(800, 500)
-        self.resize(1000, 600)
+        self.resize(1000, 800)
 
         self._recorder = None
         self._session = None
@@ -89,6 +90,9 @@ class FruitcapGUI(QMainWindow):
 
         # Apply initial codec constraints (h264 default = 8-bit only)
         self._on_codec_changed(self._codec_combo.currentText())
+
+        # Remove initial focus from editable fields
+        self._preview_widget.setFocus()
 
         # Status timer for updating recording stats
         self._status_timer = QTimer(self)
@@ -145,7 +149,6 @@ class FruitcapGUI(QMainWindow):
         video_form.addRow("Resolution:", self._resolution_combo)
 
         self._fps_combo = QComboBox()
-        self._fps_combo.setEditable(True)
         self._fps_combo.addItems(["Device default", "60", "59.94", "50", "30", "29.97", "25", "24", "23.976"])
         video_form.addRow("Frame rate:", self._fps_combo)
 
@@ -486,6 +489,11 @@ class FruitcapGUI(QMainWindow):
             self._output_edit,
         ):
             widget.setEnabled(enabled)
+
+    def mousePressEvent(self, event):
+        """Clear focus from editable fields when clicking elsewhere."""
+        self._preview_widget.setFocus()
+        super().mousePressEvent(event)
 
     def closeEvent(self, event):
         """Clean up on window close."""

@@ -88,6 +88,9 @@ class FruitcapGUI(QMainWindow):
         self._build_ui()
         self._populate_devices()
 
+        # Auto-select matching audio device for the initial video device
+        self._auto_select_audio_device()
+
         # Apply initial codec constraints (h264 default = 8-bit only)
         self._on_codec_changed(self._codec_combo.currentText())
         self._on_audio_codec_changed(self._audio_codec_combo.currentText())
@@ -211,8 +214,8 @@ class FruitcapGUI(QMainWindow):
         settings_layout.addStretch()
         splitter.addWidget(settings_widget)
 
-        # Set initial sizes: ~65% preview, ~35% settings
-        splitter.setSizes([650, 350])
+        # Set initial sizes: ~75% preview, ~25% settings
+        splitter.setSizes([750, 250])
         main_layout.addWidget(splitter, stretch=1)
 
         # Bottom: buttons
@@ -254,10 +257,32 @@ class FruitcapGUI(QMainWindow):
             self._audio_check.setEnabled(False)
 
     def _on_device_changed(self, index):
-        """Restart preview when the video device changes."""
+        """Restart preview and auto-select matching audio device."""
+        self._auto_select_audio_device()
         if self._previewing and not self._recording:
             self._stop_preview()
             QTimer.singleShot(100, self._start_preview)
+
+    def _auto_select_audio_device(self):
+        """Select the audio device whose name best matches the video device."""
+        video_dev = self._get_selected_video_device()
+        if not video_dev or self._audio_device_combo.count() == 0:
+            return
+
+        video_name = video_dev.localizedName().lower()
+
+        # Try exact match first, then substring match
+        for i in range(self._audio_device_combo.count()):
+            audio_name = self._audio_device_combo.itemText(i).lower()
+            if audio_name == video_name:
+                self._audio_device_combo.setCurrentIndex(i)
+                return
+
+        for i in range(self._audio_device_combo.count()):
+            audio_name = self._audio_device_combo.itemText(i).lower()
+            if video_name in audio_name or audio_name in video_name:
+                self._audio_device_combo.setCurrentIndex(i)
+                return
 
     def _on_codec_changed(self, codec):
         """Update UI constraints when codec changes."""

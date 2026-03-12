@@ -171,6 +171,7 @@ class FruitcapGUI(QMainWindow):
 
         self._chroma_combo = QComboBox()
         self._chroma_combo.addItems(["420", "422"])
+        self._chroma_combo.currentTextChanged.connect(self._on_chroma_changed)
         video_form.addRow("Chroma:", self._chroma_combo)
 
         self._color_space_combo = QComboBox()
@@ -304,9 +305,22 @@ class FruitcapGUI(QMainWindow):
             self._chroma_combo.setCurrentText("420")
             self._chroma_combo.setEnabled(False)
         else:
-            # h265 supports both 8 and 10-bit
-            self._bit_depth_combo.setEnabled(True)
+            # h265 supports 4:2:0 and 4:2:2, but 4:2:2 forces 10-bit
             self._chroma_combo.setEnabled(True)
+            if self._chroma_combo.currentText() == "422":
+                self._bit_depth_combo.setCurrentText("10")
+                self._bit_depth_combo.setEnabled(False)
+            else:
+                self._bit_depth_combo.setEnabled(True)
+
+    def _on_chroma_changed(self, chroma):
+        """Force 10-bit when 4:2:2 is selected with H.265 (no 8-bit 4:2:2 profile)."""
+        codec = self._codec_combo.currentText()
+        if codec == "h265" and chroma == "422":
+            self._bit_depth_combo.setCurrentText("10")
+            self._bit_depth_combo.setEnabled(False)
+        elif codec == "h265":
+            self._bit_depth_combo.setEnabled(True)
 
     def _on_audio_codec_changed(self, audio_codec):
         """Show/hide audio bitrate (only relevant for AAC)."""

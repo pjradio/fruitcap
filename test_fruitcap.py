@@ -454,6 +454,22 @@ class TestProResAndContainer:
         assert cfg["bit_depth"] == 10
         assert cfg["chroma"] == "422"
 
+    def test_h265_422_forces_10bit(self):
+        """HEVC 4:2:2 should force 10-bit (no 8-bit 4:2:2 HEVC profile)."""
+        path = self._write_cfg("[capture]\ncodec = h265\nbit_depth = 8\nchroma = 422\n[audio]\n")
+        cfg = fruitcap.load_config(path)
+        os.unlink(path)
+        assert cfg["bit_depth"] == 10
+        assert cfg["chroma"] == "422"
+
+    def test_h265_420_keeps_8bit(self):
+        """HEVC 4:2:0 should respect 8-bit config."""
+        path = self._write_cfg("[capture]\ncodec = h265\nbit_depth = 8\nchroma = 420\n[audio]\n")
+        cfg = fruitcap.load_config(path)
+        os.unlink(path)
+        assert cfg["bit_depth"] == 8
+        assert cfg["chroma"] == "420"
+
     def test_h264_keeps_config_bit_depth_chroma(self):
         """H.264 should respect config bit_depth and chroma."""
         path = self._write_cfg("[capture]\ncodec = h264\nbit_depth = 8\nchroma = 420\n[audio]\n")

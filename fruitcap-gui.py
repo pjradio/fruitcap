@@ -272,23 +272,39 @@ class FruitcapGUI(QMainWindow):
         settings_layout = QVBoxLayout(settings_widget)
         settings_layout.setContentsMargins(4, 4, 4, 4)
 
+        # Shared form layout helper for consistent label alignment
+        label_min_width = 80
+
+        def make_form():
+            form = QFormLayout()
+            form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            return form
+
+        def add_row(form, text, widget):
+            label = QLabel(text)
+            label.setFixedWidth(label_min_width)
+            label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            form.addRow(label, widget)
+            return label
+
         # Device group
         device_group = QGroupBox("Devices")
-        device_form = QFormLayout()
+        device_form = make_form()
         self._video_device_combo = QComboBox()
         self._video_device_combo.currentIndexChanged.connect(self._on_device_changed)
-        device_form.addRow("Video:", self._video_device_combo)
+        add_row(device_form, "Video:", self._video_device_combo)
         self._audio_device_combo = QComboBox()
-        device_form.addRow("Audio:", self._audio_device_combo)
+        add_row(device_form, "Audio:", self._audio_device_combo)
         self._audio_check = QCheckBox("Capture audio")
         self._audio_check.setChecked(True)
-        device_form.addRow("", self._audio_check)
+        add_row(device_form, "", self._audio_check)
         device_group.setLayout(device_form)
         settings_layout.addWidget(device_group)
 
         # Video settings group
         video_group = QGroupBox("Video")
-        video_form = QFormLayout()
+        video_form = make_form()
 
         self._codec_combo = QComboBox()
         for label, value in [
@@ -299,75 +315,76 @@ class FruitcapGUI(QMainWindow):
             self._codec_combo.addItem(label, value)
         self._codec_combo.currentIndexChanged.connect(
             lambda _: self._on_codec_changed(self._codec_combo.currentData()))
-        video_form.addRow("Codec:", self._codec_combo)
+        add_row(video_form, "Codec:", self._codec_combo)
 
         self._resolution_combo = QComboBox()
         self._resolution_combo.addItems(["4k", "1080p", "720p"])
         self._resolution_combo.setCurrentText("4k")
-        video_form.addRow("Resolution:", self._resolution_combo)
+        add_row(video_form, "Resolution:", self._resolution_combo)
 
         self._fps_combo = QComboBox()
         self._fps_combo.addItems(["Device default", "60", "59.94", "50", "30", "29.97", "25", "24", "23.976"])
-        video_form.addRow("Frame rate:", self._fps_combo)
+        add_row(video_form, "Frame rate:", self._fps_combo)
 
         self._bitrate_edit = QLineEdit("80m")
-        video_form.addRow("Bitrate:", self._bitrate_edit)
+        self._bitrate_edit.setMaximumWidth(80)
+        add_row(video_form, "Bitrate:", self._bitrate_edit)
 
         self._container_combo = QComboBox()
         for label, value in [("Auto", "auto"), ("MP4", "mp4"), ("MOV", "mov")]:
             self._container_combo.addItem(label, value)
-        video_form.addRow("Container:", self._container_combo)
+        add_row(video_form, "Container:", self._container_combo)
 
         self._bit_depth_combo = QComboBox()
         self._bit_depth_combo.addItems(["8", "10"])
-        video_form.addRow("Bit depth:", self._bit_depth_combo)
+        add_row(video_form, "Bit depth:", self._bit_depth_combo)
 
         self._chroma_combo = QComboBox()
         for label, value in [("4:2:0", "420"), ("4:2:2", "422")]:
             self._chroma_combo.addItem(label, value)
         self._chroma_combo.currentIndexChanged.connect(
             lambda _: self._on_chroma_changed(self._chroma_combo.currentData()))
-        video_form.addRow("Chroma:", self._chroma_combo)
+        add_row(video_form, "Chroma:", self._chroma_combo)
 
         self._color_space_combo = QComboBox()
         self._color_space_combo.addItems(list(COLOR_SPACE_PRESETS.keys()))
-        video_form.addRow("Color space:", self._color_space_combo)
+        add_row(video_form, "Color space:", self._color_space_combo)
 
         video_group.setLayout(video_form)
         settings_layout.addWidget(video_group)
 
         # Audio settings group
         audio_group = QGroupBox("Audio")
-        audio_form = QFormLayout()
+        audio_form = make_form()
 
         self._audio_codec_combo = QComboBox()
         for label, value in [("AAC", "aac"), ("ALAC", "alac"), ("PCM", "pcm")]:
             self._audio_codec_combo.addItem(label, value)
         self._audio_codec_combo.currentIndexChanged.connect(
             lambda _: self._on_audio_codec_changed(self._audio_codec_combo.currentData()))
-        audio_form.addRow("Codec:", self._audio_codec_combo)
+        add_row(audio_form, "Codec:", self._audio_codec_combo)
 
-        self._audio_bitrate_label = QLabel("Bitrate:")
         self._audio_bitrate_edit = QLineEdit("256k")
-        audio_form.addRow(self._audio_bitrate_label, self._audio_bitrate_edit)
+        self._audio_bitrate_edit.setMaximumWidth(80)
+        self._audio_bitrate_label = add_row(audio_form, "Bitrate:", self._audio_bitrate_edit)
 
         self._audio_sample_rate_combo = QComboBox()
         self._audio_sample_rate_combo.addItems(["48000", "44100", "96000"])
-        audio_form.addRow("Sample rate:", self._audio_sample_rate_combo)
+        add_row(audio_form, "Sample rate:", self._audio_sample_rate_combo)
 
         self._audio_channels_combo = QComboBox()
         self._audio_channels_combo.addItems(["1", "2"])
-        audio_form.addRow("Channels:", self._audio_channels_combo)
+        add_row(audio_form, "Channels:", self._audio_channels_combo)
 
         audio_group.setLayout(audio_form)
         settings_layout.addWidget(audio_group)
 
         # Output
         output_group = QGroupBox("Output")
-        output_form = QFormLayout()
+        output_form = make_form()
         self._output_edit = QLineEdit("capture-%d-%t.mp4")
         self._output_edit.setMinimumWidth(200)
-        output_form.addRow("File:", self._output_edit)
+        add_row(output_form, "File:", self._output_edit)
         output_group.setLayout(output_form)
         settings_layout.addWidget(output_group)
 

@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (
     QGroupBox, QSplitter, QCheckBox, QStatusBar, QSizePolicy,
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
+from PyQt5.QtGui import QPainter, QColor
 
 import AVFoundation as AVF
 import CoreMedia
@@ -67,9 +68,140 @@ class PreviewWidget(QWidget):
             self._preview_layer.setFrame_(ns_view.bounds())
 
 
+class VUMeterWidget(QWidget):
+    """Two-channel horizontal VU meter with green/yellow/red bars and peak hold."""
+
+    # dB tick marks to draw on the scale
+    _TICK_DB = [-48, -36, -24, -18, -12, -6, -3, 0]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._levels = [0.0, 0.0]      # 0.0–1.0 for L/R
+        self._peak_levels = [0.0, 0.0]
+        self._peak_decay = 0.95
+        self.setMinimumHeight(40)
+        self.setMaximumHeight(48)
+
+    def set_levels_db(self, levels_db):
+        """Update from dB values (typically -60 to 0)."""
+        for i in range(min(2, len(levels_db))):
+            db = max(-60.0, min(0.0, levels_db[i]))
+            linear = (db + 60.0) / 60.0
+            self._levels[i] = linear
+            if linear > self._peak_levels[i]:
+                self._peak_levels[i] = linear
+            else:
+                self._peak_levels[i] *= self._peak_decay
+        self.update()
+
+    def _db_to_x(self, db, bar_x, bar_w):
+        """Convert a dB value (-60..0) to an x pixel position."""
+        linear = (max(-60.0, min(0.0, db)) + 60.0) / 60.0
+        return bar_x + int(bar_w * linear)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        w = self.width()
+        h = self.height()
+        scale_height = 12
+        bar_height = max(1, (h - scale_height - 4) // 2)
+        label_width = 14
+        bar_x = label_width + 2
+        bar_w = w - bar_x - 2
+
+        for i, label in enumerate(("L", "R")):
+            y = i * (bar_height + 2) + 1
+            level = self._levels[i]
+            peak = self._peak_levels[i]
+
+            # Channel label
+            painter.setPen(QColor(180, 180, 180))
+            painter.drawText(0, y, label_width, bar_height, Qt.AlignCenter, label)
+
+            # Background
+            painter.fillRect(bar_x, y, bar_w, bar_height, QColor(30, 30, 30))
+
+            # Level bar: green up to -12 dB, yellow -12 to -6, red -6 to 0
+            level_w = int(bar_w * level)
+            green_end = self._db_to_x(-12, 0, bar_w)
+            yellow_end = self._db_to_x(-6, 0, bar_w)
+
+            if level_w > 0:
+                gw = min(level_w, green_end)
+                if gw > 0:
+                    painter.fillRect(bar_x, y, gw, bar_height, QColor(0, 180, 0))
+                if level_w > green_end:
+                    yw = min(level_w - green_end, yellow_end - green_end)
+                    if yw > 0:
+                        painter.fillRect(bar_x + green_end, y, yw, bar_height, QColor(220, 200, 0))
+                if level_w > yellow_end:
+                    rw = level_w - yellow_end
+                    painter.fillRect(bar_x + yellow_end, y, rw, bar_height, QColor(220, 30, 0))
+
+            # Peak hold indicator
+            peak_x = bar_x + int(bar_w * peak)
+            if peak_x > bar_x + 1:
+                painter.fillRect(peak_x - 1, y, 2, bar_height, QColor(255, 255, 255))
+
+        # dB scale below bars
+        scale_y = 2 * (bar_height + 2) + 1
+        font = painter.font()
+        font.setPixelSize(9)
+        painter.setFont(font)
+        painter.setPen(QColor(140, 140, 140))
+
+        for db in self._TICK_DB:
+            x = self._db_to_x(db, bar_x, bar_w)
+            # Tick mark
+            painter.drawLine(x, scale_y, x, scale_y + 3)
+            # Label
+            text = str(db) if db < 0 else " 0"
+            tw = painter.fontMetrics().horizontalAdvance(text)
+            painter.drawText(x - tw // 2, scale_y + scale_height, text)
+
+        painter.end()
+
+
+class GUISampleBufferDelegate(SampleBufferDelegate):
+    """Extends SampleBufferDelegate to extract audio levels for the VU meter."""
+
+    def init(self):
+        self = objc.super(GUISampleBufferDelegate, self).init()
+        if self is None:
+            return None
+        self.recorder = None
+        self.video_output = None
+        self.audio_output = None
+        self.audio_level_callback = None
+        return self
+
+    def captureOutput_didOutputSampleBuffer_fromConnection_(
+        self, output, sample_buffer, connection
+    ):
+        if output is self.audio_output:
+            # Extract levels from AVCaptureAudioChannel (works during preview and recording)
+            if self.audio_level_callback:
+                channels = connection.audioChannels()
+                if channels and len(channels) > 0:
+                    levels = [ch.averagePowerLevel() for ch in channels]
+                    self.audio_level_callback(levels)
+            # Forward to recorder for recording
+            if self.recorder:
+                self.recorder.handle_audio_sample_buffer(sample_buffer)
+        elif output is self.video_output and self.recorder:
+            self.recorder.handle_video_sample_buffer(sample_buffer)
+
+    def captureOutput_didDropSampleBuffer_fromConnection_(
+        self, output, sample_buffer, connection
+    ):
+        if self.recorder and output is self.video_output:
+            self.recorder.frames_dropped += 1
+
+
 class StatusSignal(QObject):
     """Bridge to send stop notifications from capture threads to the Qt main thread."""
     stopped = pyqtSignal()
+    audio_levels = pyqtSignal(list)
 
 
 class FruitcapGUI(QMainWindow):
@@ -86,6 +218,7 @@ class FruitcapGUI(QMainWindow):
         self._previewing = False
         self._status_signal = StatusSignal()
         self._status_signal.stopped.connect(self._on_recording_stopped)
+        self._status_signal.audio_levels.connect(self._on_audio_levels)
 
         self._build_ui()
         self._populate_devices()
@@ -94,8 +227,8 @@ class FruitcapGUI(QMainWindow):
         self._auto_select_audio_device()
 
         # Apply initial codec constraints (h264 default = 8-bit only)
-        self._on_codec_changed(self._codec_combo.currentText())
-        self._on_audio_codec_changed(self._audio_codec_combo.currentText())
+        self._on_codec_changed(self._codec_combo.currentData())
+        self._on_audio_codec_changed(self._audio_codec_combo.currentData())
 
         # Remove initial focus from editable fields
         self._preview_widget.setFocus()
@@ -116,9 +249,16 @@ class FruitcapGUI(QMainWindow):
         # Top area: preview + settings side by side
         splitter = QSplitter(Qt.Horizontal)
 
-        # Left: preview
+        # Left: preview + VU meter
+        preview_container = QWidget()
+        preview_layout = QVBoxLayout(preview_container)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(2)
         self._preview_widget = PreviewWidget()
-        splitter.addWidget(self._preview_widget)
+        preview_layout.addWidget(self._preview_widget, stretch=1)
+        self._vu_meter = VUMeterWidget()
+        preview_layout.addWidget(self._vu_meter)
+        splitter.addWidget(preview_container)
 
         # Right: settings
         settings_widget = QWidget()
@@ -144,9 +284,14 @@ class FruitcapGUI(QMainWindow):
         video_form = QFormLayout()
 
         self._codec_combo = QComboBox()
-        self._codec_combo.addItems(["h264", "h265", "prores", "prores_proxy", "prores_lt", "prores_hq"])
-        self._codec_combo.setCurrentText("h264")
-        self._codec_combo.currentTextChanged.connect(self._on_codec_changed)
+        for label, value in [
+            ("H.264", "h264"), ("H.265 (HEVC)", "h265"),
+            ("ProRes 422", "prores"), ("ProRes 422 Proxy", "prores_proxy"),
+            ("ProRes 422 LT", "prores_lt"), ("ProRes 422 HQ", "prores_hq"),
+        ]:
+            self._codec_combo.addItem(label, value)
+        self._codec_combo.currentIndexChanged.connect(
+            lambda _: self._on_codec_changed(self._codec_combo.currentData()))
         video_form.addRow("Codec:", self._codec_combo)
 
         self._resolution_combo = QComboBox()
@@ -162,7 +307,8 @@ class FruitcapGUI(QMainWindow):
         video_form.addRow("Bitrate:", self._bitrate_edit)
 
         self._container_combo = QComboBox()
-        self._container_combo.addItems(["auto", "mp4", "mov"])
+        for label, value in [("Auto", "auto"), ("MP4", "mp4"), ("MOV", "mov")]:
+            self._container_combo.addItem(label, value)
         video_form.addRow("Container:", self._container_combo)
 
         self._bit_depth_combo = QComboBox()
@@ -170,8 +316,10 @@ class FruitcapGUI(QMainWindow):
         video_form.addRow("Bit depth:", self._bit_depth_combo)
 
         self._chroma_combo = QComboBox()
-        self._chroma_combo.addItems(["420", "422"])
-        self._chroma_combo.currentTextChanged.connect(self._on_chroma_changed)
+        for label, value in [("4:2:0", "420"), ("4:2:2", "422")]:
+            self._chroma_combo.addItem(label, value)
+        self._chroma_combo.currentIndexChanged.connect(
+            lambda _: self._on_chroma_changed(self._chroma_combo.currentData()))
         video_form.addRow("Chroma:", self._chroma_combo)
 
         self._color_space_combo = QComboBox()
@@ -186,8 +334,10 @@ class FruitcapGUI(QMainWindow):
         audio_form = QFormLayout()
 
         self._audio_codec_combo = QComboBox()
-        self._audio_codec_combo.addItems(["aac", "alac", "pcm"])
-        self._audio_codec_combo.currentTextChanged.connect(self._on_audio_codec_changed)
+        for label, value in [("AAC", "aac"), ("ALAC", "alac"), ("PCM", "pcm")]:
+            self._audio_codec_combo.addItem(label, value)
+        self._audio_codec_combo.currentIndexChanged.connect(
+            lambda _: self._on_audio_codec_changed(self._audio_codec_combo.currentData()))
         audio_form.addRow("Codec:", self._audio_codec_combo)
 
         self._audio_bitrate_label = QLabel("Bitrate:")
@@ -293,21 +443,21 @@ class FruitcapGUI(QMainWindow):
         self._bitrate_edit.setEnabled(not is_prores)
         if is_prores:
             self._bit_depth_combo.setCurrentText("10")
-            self._chroma_combo.setCurrentText("422")
+            self._chroma_combo.setCurrentIndex(self._chroma_combo.findData("422"))
             self._bit_depth_combo.setEnabled(False)
             self._chroma_combo.setEnabled(False)
-            self._container_combo.setCurrentText("mov")
-            self._audio_codec_combo.setCurrentText("pcm")
+            self._container_combo.setCurrentIndex(self._container_combo.findData("mov"))
+            self._audio_codec_combo.setCurrentIndex(self._audio_codec_combo.findData("pcm"))
         elif codec == "h264":
             # H.264 only supports 8-bit 4:2:0 on Apple's hardware encoder
             self._bit_depth_combo.setCurrentText("8")
             self._bit_depth_combo.setEnabled(False)
-            self._chroma_combo.setCurrentText("420")
+            self._chroma_combo.setCurrentIndex(self._chroma_combo.findData("420"))
             self._chroma_combo.setEnabled(False)
         else:
             # h265 supports 4:2:0 and 4:2:2, but 4:2:2 forces 10-bit
             self._chroma_combo.setEnabled(True)
-            if self._chroma_combo.currentText() == "422":
+            if self._chroma_combo.currentData() == "422":
                 self._bit_depth_combo.setCurrentText("10")
                 self._bit_depth_combo.setEnabled(False)
             else:
@@ -315,7 +465,7 @@ class FruitcapGUI(QMainWindow):
 
     def _on_chroma_changed(self, chroma):
         """Force 10-bit when 4:2:2 is selected with H.265 (no 8-bit 4:2:2 profile)."""
-        codec = self._codec_combo.currentText()
+        codec = self._codec_combo.currentData()
         if codec == "h265" and chroma == "422":
             self._bit_depth_combo.setCurrentText("10")
             self._bit_depth_combo.setEnabled(False)
@@ -345,15 +495,15 @@ class FruitcapGUI(QMainWindow):
     def _build_config(self):
         """Build a config dict from the current UI settings."""
         overrides = {
-            "codec": self._codec_combo.currentText(),
+            "codec": self._codec_combo.currentData(),
             "resolution": self._resolution_combo.currentText(),
-            "container": self._container_combo.currentText(),
+            "container": self._container_combo.currentData(),
             "bit_depth": self._bit_depth_combo.currentText(),
-            "chroma": self._chroma_combo.currentText(),
+            "chroma": self._chroma_combo.currentData(),
             "color_space": self._color_space_combo.currentText(),
             "bitrate": self._bitrate_edit.text(),
             "output": self._output_edit.text(),
-            "audio_codec": self._audio_codec_combo.currentText(),
+            "audio_codec": self._audio_codec_combo.currentData(),
             "audio_bitrate": self._audio_bitrate_edit.text(),
             "audio_sample_rate": self._audio_sample_rate_combo.currentText(),
             "audio_channels": self._audio_channels_combo.currentText(),
@@ -404,7 +554,8 @@ class FruitcapGUI(QMainWindow):
 
         # Set up delegate and video data output (buffers are discarded
         # until a recorder is attached via delegate.recorder)
-        self._delegate = SampleBufferDelegate.alloc().init()
+        self._delegate = GUISampleBufferDelegate.alloc().init()
+        self._delegate.audio_level_callback = lambda levels: self._status_signal.audio_levels.emit(levels)
 
         video_output = AVF.AVCaptureVideoDataOutput.alloc().init()
         video_output.setAlwaysDiscardsLateVideoFrames_(True)
@@ -566,6 +717,10 @@ class FruitcapGUI(QMainWindow):
             f"REC  {hours:02d}:{minutes:02d}:{seconds:02d}  "
             f"frames: {frames}{dropped_str}  size: {size_str}"
         )
+
+    def _on_audio_levels(self, levels):
+        """Update VU meter from audio callback (runs on main thread via signal)."""
+        self._vu_meter.set_levels_db(levels)
 
     def _set_settings_enabled(self, enabled):
         """Enable/disable all settings controls."""

@@ -79,8 +79,8 @@ class VUMeterWidget(QWidget):
         self._levels = [0.0, 0.0]      # 0.0–1.0 for L/R
         self._peak_levels = [0.0, 0.0]
         self._peak_decay = 0.95
-        self.setMinimumHeight(40)
-        self.setMaximumHeight(48)
+        self.setMinimumHeight(48)
+        self.setMaximumHeight(56)
 
     def set_levels_db(self, levels_db):
         """Update from dB values (typically -60 to 0)."""
@@ -103,11 +103,12 @@ class VUMeterWidget(QWidget):
         painter = QPainter(self)
         w = self.width()
         h = self.height()
-        scale_height = 12
-        bar_height = max(1, (h - scale_height - 4) // 2)
+        scale_height = 14
+        bottom_pad = 4
+        bar_height = max(1, (h - scale_height - bottom_pad - 4) // 2)
         label_width = 14
         bar_x = label_width + 2
-        bar_w = w - bar_x - 2
+        bar_w = w - bar_x - 10
 
         for i, label in enumerate(("L", "R")):
             y = i * (bar_height + 2) + 1
@@ -122,21 +123,27 @@ class VUMeterWidget(QWidget):
             painter.fillRect(bar_x, y, bar_w, bar_height, QColor(30, 30, 30))
 
             # Level bar: green up to -12 dB, yellow -12 to -6, red -6 to 0
-            level_w = int(bar_w * level)
-            green_end = self._db_to_x(-12, 0, bar_w)
-            yellow_end = self._db_to_x(-6, 0, bar_w)
+            # Thresholds as linear 0–1 values (same space as level)
+            green_thresh = (-12.0 + 60.0) / 60.0   # 0.80
+            yellow_thresh = (-6.0 + 60.0) / 60.0    # 0.90
 
-            if level_w > 0:
-                gw = min(level_w, green_end)
+            if level > 0:
+                # Green portion: 0 to min(level, green_thresh)
+                gw = int(bar_w * min(level, green_thresh))
                 if gw > 0:
                     painter.fillRect(bar_x, y, gw, bar_height, QColor(0, 180, 0))
-                if level_w > green_end:
-                    yw = min(level_w - green_end, yellow_end - green_end)
-                    if yw > 0:
-                        painter.fillRect(bar_x + green_end, y, yw, bar_height, QColor(220, 200, 0))
-                if level_w > yellow_end:
-                    rw = level_w - yellow_end
-                    painter.fillRect(bar_x + yellow_end, y, rw, bar_height, QColor(220, 30, 0))
+                # Yellow portion: green_thresh to min(level, yellow_thresh)
+                if level > green_thresh:
+                    y_start = int(bar_w * green_thresh)
+                    y_end = int(bar_w * min(level, yellow_thresh))
+                    if y_end > y_start:
+                        painter.fillRect(bar_x + y_start, y, y_end - y_start, bar_height, QColor(220, 200, 0))
+                # Red portion: yellow_thresh to level
+                if level > yellow_thresh:
+                    r_start = int(bar_w * yellow_thresh)
+                    r_end = int(bar_w * level)
+                    if r_end > r_start:
+                        painter.fillRect(bar_x + r_start, y, r_end - r_start, bar_height, QColor(220, 30, 0))
 
             # Peak hold indicator
             peak_x = bar_x + int(bar_w * peak)

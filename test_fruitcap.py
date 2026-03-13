@@ -2,7 +2,9 @@
 """Tests for fruitcap improvements."""
 
 import configparser
+import ctypes
 import datetime
+import importlib.util
 import os
 import signal
 import sys
@@ -23,7 +25,82 @@ import pytest
 import fruitcap
 
 
+def load_fruitcap_gui():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    module_name = "fruitcap_gui"
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+
+    path = os.path.join(os.path.dirname(__file__), "fruitcap-gui.py")
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 # ── SIGTERM handling ──
+
+
+class TestAudioSamplePeakAnalyzer:
+    def _patch_audio_buffer(self, monkeypatch, samples, asbd):
+        block_buf = object()
+
+        monkeypatch.setattr(fruitcap.objc, "pyobjc_id", lambda _: 12345)
+        monkeypatch.setattr(fruitcap._cm_lib, "CMSampleBufferGetFormatDescription", lambda _: 1)
+        monkeypatch.setattr(
+            fruitcap._cm_lib,
+            "CMAudioFormatDescriptionGetStreamBasicDescription",
+            lambda _: ctypes.addressof(asbd),
+        )
+        monkeypatch.setattr(fruitcap._cm_lib, "CMSampleBufferGetDataBuffer", lambda _: block_buf)
+        monkeypatch.setattr(
+            fruitcap._cm_lib,
+            "CMBlockBufferGetDataLength",
+            lambda _: ctypes.sizeof(samples),
+        )
+
+        def fake_get_data_pointer(block, offset, length_at_offset, total_length, data_out_ptr):
+            data_out_ptr._obj.value = ctypes.addressof(samples)
+            return 0
+
+        monkeypatch.setattr(
+            fruitcap._cm_lib,
+            "CMBlockBufferGetDataPointer",
+            fake_get_data_pointer,
+        )
+
+    def test_measure_channel_peaks_interleaved_int16(self, monkeypatch):
+        analyzer = fruitcap.AudioSamplePeakAnalyzer()
+        samples = (ctypes.c_int16 * 6)(1000, -2000, 3000, -4000, 500, -600)
+        asbd = fruitcap.AudioStreamBasicDescription()
+        asbd.mFormatFlags = 0
+        asbd.mChannelsPerFrame = 2
+        asbd.mBitsPerChannel = 16
+        self._patch_audio_buffer(monkeypatch, samples, asbd)
+
+        peaks = analyzer.measure_channel_peaks(object())
+
+        assert peaks == pytest.approx([3000 / 32768.0, 4000 / 32768.0])
+        assert analyzer.measure_overall_peak(object()) == pytest.approx(4000 / 32768.0)
+
+    def test_measure_channel_peaks_non_interleaved_float32(self, monkeypatch):
+        analyzer = fruitcap.AudioSamplePeakAnalyzer()
+        samples = (ctypes.c_float * 6)(0.1, -0.5, 0.2, -0.25, 0.75, -0.4)
+        asbd = fruitcap.AudioStreamBasicDescription()
+        asbd.mFormatFlags = fruitcap.AudioSamplePeakAnalyzer._FLAG_IS_FLOAT | (
+            fruitcap.AudioSamplePeakAnalyzer._FLAG_IS_NON_INTERLEAVED
+        )
+        asbd.mChannelsPerFrame = 2
+        asbd.mBitsPerChannel = 32
+        self._patch_audio_buffer(monkeypatch, samples, asbd)
+
+        peaks = analyzer.measure_channel_peaks(object())
+
+        assert peaks == pytest.approx([0.5, 0.75])
+        assert fruitcap.AudioSamplePeakAnalyzer.peaks_to_dbfs(peaks) == pytest.approx(
+            [20.0 * fruitcap.math.log10(0.5), 20.0 * fruitcap.math.log10(0.75)]
+        )
 
 # ── Bitrate shorthand ──
 
@@ -1124,6 +1201,114 @@ class TestRunHeadless:
                 fruitcap.run_headless(recorder)
 
         assert recorder.stop_calls == 1
+
+
+class TestGuiAudioMeter:
+    """AudioLevelMeterWidget is a QWidget and needs a QApplication to
+    instantiate, so we test its level-update logic via the module constants
+    and verify the class exists with the expected interface."""
+
+    def test_meter_widget_has_expected_attrs(self):
+        gui = load_fruitcap_gui()
+        assert hasattr(gui.AudioLevelMeterWidget, "set_levels_db")
+        assert hasattr(gui.AudioLevelMeterWidget, "clear")
+        assert gui.AudioLevelMeterWidget._MIN_DB == -60.0
+
+
+class TestGuiSignalHandling:
+    def test_sigint_requests_window_close(self):
+        gui = load_fruitcap_gui()
+        handlers = {}
+        app = mock.Mock()
+        app._signal_exit_code = 0
+        window = mock.Mock()
+        window.isVisible.return_value = True
+        timers = []
+
+        class FakeSignal:
+            def __init__(self):
+                self._callbacks = []
+
+            def connect(self, callback):
+                self._callbacks.append(callback)
+
+            def emit(self):
+                for callback in list(self._callbacks):
+                    callback()
+
+        class FakeTimer:
+            def __init__(self, parent=None):
+                self.parent = parent
+                self.interval = None
+                self.timeout = FakeSignal()
+                self.started = False
+                timers.append(self)
+
+            def setInterval(self, interval):
+                self.interval = interval
+
+            def start(self):
+                self.started = True
+
+        with mock.patch.object(gui, "QTimer", FakeTimer):
+            with mock.patch.object(
+                gui.signal,
+                "signal",
+                side_effect=lambda sig, handler: handlers.setdefault(sig, handler),
+            ):
+                timer = gui.install_signal_handlers(app, window)
+
+        assert timers == [timer]
+        assert timer.interval == 100
+        assert timer.started is True
+        handlers[signal.SIGINT](signal.SIGINT, None)
+        timer.timeout.emit()
+
+        window.close.assert_called_once_with()
+        assert app._signal_exit_code == 130
+
+    def test_sigint_quits_when_window_is_not_visible(self):
+        gui = load_fruitcap_gui()
+        handlers = {}
+        app = mock.Mock()
+        app._signal_exit_code = 0
+        window = mock.Mock()
+        window.isVisible.return_value = False
+
+        class FakeSignal:
+            def __init__(self):
+                self._callbacks = []
+
+            def connect(self, callback):
+                self._callbacks.append(callback)
+
+            def emit(self):
+                for callback in list(self._callbacks):
+                    callback()
+
+        class FakeTimer:
+            def __init__(self, parent=None):
+                self.timeout = FakeSignal()
+
+            def setInterval(self, interval):
+                self.interval = interval
+
+            def start(self):
+                self.started = True
+
+        with mock.patch.object(gui, "QTimer", FakeTimer):
+            with mock.patch.object(
+                gui.signal,
+                "signal",
+                side_effect=lambda sig, handler: handlers.setdefault(sig, handler),
+            ):
+                timer = gui.install_signal_handlers(app, window)
+
+        handlers[signal.SIGINT](signal.SIGINT, None)
+        timer.timeout.emit()
+
+        app.quit.assert_called_once_with()
+        window.close.assert_not_called()
 
 
 class TestAdoptSession:

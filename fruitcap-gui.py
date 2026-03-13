@@ -4,11 +4,12 @@
 Author: Phil Jensen <philj@philandamy.org>
 """
 
-import math
 import os
+import signal
 import sys
-import time
 import threading
+import time
+from ctypes import c_void_p
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -68,35 +69,36 @@ class PreviewWidget(QWidget):
             self._preview_layer.setFrame_(ns_view.bounds())
 
 
-class VUMeterWidget(QWidget):
-    """Two-channel horizontal VU meter with green/yellow/red bars and peak hold."""
+class AudioLevelMeterWidget(QWidget):
+    """Two-channel horizontal dBFS meter."""
 
     # dB tick marks to draw on the scale
     _TICK_DB = [-48, -36, -24, -18, -12, -6, -3, 0]
+    _MIN_DB = -60.0
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._levels = [0.0, 0.0]      # 0.0–1.0 for L/R
-        self._peak_levels = [0.0, 0.0]
-        self._peak_decay = 0.95
+        self._average_db = [self._MIN_DB, self._MIN_DB]
         self.setMinimumHeight(48)
         self.setMaximumHeight(56)
 
-    def set_levels_db(self, levels_db):
-        """Update from dB values (typically -60 to 0)."""
-        for i in range(min(2, len(levels_db))):
-            db = max(-60.0, min(0.0, levels_db[i]))
-            linear = (db + 60.0) / 60.0
-            self._levels[i] = linear
-            if linear > self._peak_levels[i]:
-                self._peak_levels[i] = linear
+    def clear(self):
+        self._average_db = [self._MIN_DB, self._MIN_DB]
+        self.update()
+
+    def set_levels_db(self, meter_data):
+        """Update from capture metering data."""
+        average_db = meter_data.get("average_db", [])
+        for i in range(2):
+            if i < len(average_db):
+                self._average_db[i] = max(self._MIN_DB, min(0.0, average_db[i]))
             else:
-                self._peak_levels[i] *= self._peak_decay
+                self._average_db[i] = self._MIN_DB
         self.update()
 
     def _db_to_x(self, db, bar_x, bar_w):
         """Convert a dB value (-60..0) to an x pixel position."""
-        linear = (max(-60.0, min(0.0, db)) + 60.0) / 60.0
+        linear = (max(self._MIN_DB, min(0.0, db)) + abs(self._MIN_DB)) / abs(self._MIN_DB)
         return bar_x + int(bar_w * linear)
 
     def paintEvent(self, event):
@@ -108,12 +110,12 @@ class VUMeterWidget(QWidget):
         bar_height = max(1, (h - scale_height - bottom_pad - 4) // 2)
         label_width = 14
         bar_x = label_width + 2
-        bar_w = w - bar_x - 10
+        right_pad = 32
+        bar_w = max(20, w - bar_x - right_pad)
 
         for i, label in enumerate(("L", "R")):
             y = i * (bar_height + 2) + 1
-            level = self._levels[i]
-            peak = self._peak_levels[i]
+            level_db = self._average_db[i]
 
             # Channel label
             painter.setPen(QColor(180, 180, 180))
@@ -122,35 +124,28 @@ class VUMeterWidget(QWidget):
             # Background
             painter.fillRect(bar_x, y, bar_w, bar_height, QColor(30, 30, 30))
 
-            # Level bar: green up to -12 dB, yellow -12 to -6, red -6 to 0
-            # Thresholds as linear 0–1 values (same space as level)
-            green_thresh = (-12.0 + 60.0) / 60.0   # 0.80
-            yellow_thresh = (-6.0 + 60.0) / 60.0    # 0.90
+            if level_db > self._MIN_DB:
+                green_end = self._db_to_x(min(level_db, -12.0), bar_x, bar_w)
+                if green_end > bar_x:
+                    painter.fillRect(bar_x, y, green_end - bar_x, bar_height, QColor(0, 180, 0))
 
-            if level > 0:
-                # Green portion: 0 to min(level, green_thresh)
-                gw = int(bar_w * min(level, green_thresh))
-                if gw > 0:
-                    painter.fillRect(bar_x, y, gw, bar_height, QColor(0, 180, 0))
-                # Yellow portion: green_thresh to min(level, yellow_thresh)
-                if level > green_thresh:
-                    y_start = int(bar_w * green_thresh)
-                    y_end = int(bar_w * min(level, yellow_thresh))
-                    if y_end > y_start:
-                        painter.fillRect(bar_x + y_start, y, y_end - y_start, bar_height, QColor(220, 200, 0))
-                # Red portion: yellow_thresh to level
-                if level > yellow_thresh:
-                    r_start = int(bar_w * yellow_thresh)
-                    r_end = int(bar_w * level)
-                    if r_end > r_start:
-                        painter.fillRect(bar_x + r_start, y, r_end - r_start, bar_height, QColor(220, 30, 0))
+                if level_db > -12.0:
+                    yellow_start = self._db_to_x(-12.0, bar_x, bar_w)
+                    yellow_end = self._db_to_x(min(level_db, -6.0), bar_x, bar_w)
+                    if yellow_end > yellow_start:
+                        painter.fillRect(
+                            yellow_start, y, yellow_end - yellow_start, bar_height, QColor(220, 200, 0)
+                        )
 
-            # Peak hold indicator
-            peak_x = bar_x + int(bar_w * peak)
-            if peak_x > bar_x + 1:
-                painter.fillRect(peak_x - 1, y, 2, bar_height, QColor(255, 255, 255))
+                if level_db > -6.0:
+                    red_start = self._db_to_x(-6.0, bar_x, bar_w)
+                    red_end = self._db_to_x(level_db, bar_x, bar_w)
+                    if red_end > red_start:
+                        painter.fillRect(
+                            red_start, y, red_end - red_start, bar_height, QColor(220, 30, 0)
+                        )
 
-        # dB scale below bars
+        # dBFS scale below bars
         scale_y = 2 * (bar_height + 2) + 1
         font = painter.font()
         font.setPixelSize(9)
@@ -166,11 +161,13 @@ class VUMeterWidget(QWidget):
             tw = painter.fontMetrics().horizontalAdvance(text)
             painter.drawText(x - tw // 2, scale_y + scale_height, text)
 
+        painter.drawText(bar_x + bar_w + 4, scale_y + scale_height, "dBFS")
+
         painter.end()
 
 
 class GUISampleBufferDelegate(SampleBufferDelegate):
-    """Extends SampleBufferDelegate to extract audio levels for the VU meter."""
+    """Extends SampleBufferDelegate to extract dBFS audio levels for the GUI meter."""
 
     def init(self):
         self = objc.super(GUISampleBufferDelegate, self).init()
@@ -186,12 +183,11 @@ class GUISampleBufferDelegate(SampleBufferDelegate):
         self, output, sample_buffer, connection
     ):
         if output is self.audio_output:
-            # Extract levels from AVCaptureAudioChannel (works during preview and recording)
             if self.audio_level_callback:
-                channels = connection.audioChannels()
-                if channels and len(channels) > 0:
-                    levels = [ch.averagePowerLevel() for ch in channels]
-                    self.audio_level_callback(levels)
+                channels = connection.audioChannels() or []
+                average_db = [ch.averagePowerLevel() for ch in channels]
+                if average_db:
+                    self.audio_level_callback({"average_db": average_db})
             # Forward to recorder for recording
             if self.recorder:
                 self.recorder.handle_audio_sample_buffer(sample_buffer)
@@ -208,7 +204,7 @@ class GUISampleBufferDelegate(SampleBufferDelegate):
 class StatusSignal(QObject):
     """Bridge to send stop notifications from capture threads to the Qt main thread."""
     stopped = pyqtSignal()
-    audio_levels = pyqtSignal(list)
+    audio_levels = pyqtSignal(object)
 
 
 class FruitcapGUI(QMainWindow):
@@ -256,15 +252,15 @@ class FruitcapGUI(QMainWindow):
         # Top area: preview + settings side by side
         splitter = QSplitter(Qt.Horizontal)
 
-        # Left: preview + VU meter
+        # Left: preview + audio meter
         preview_container = QWidget()
         preview_layout = QVBoxLayout(preview_container)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(2)
         self._preview_widget = PreviewWidget()
         preview_layout.addWidget(self._preview_widget, stretch=1)
-        self._vu_meter = VUMeterWidget()
-        preview_layout.addWidget(self._vu_meter)
+        self._audio_meter = AudioLevelMeterWidget()
+        preview_layout.addWidget(self._audio_meter)
         splitter.addWidget(preview_container)
 
         # Right: settings
@@ -563,6 +559,8 @@ class FruitcapGUI(QMainWindow):
             self._statusbar.showMessage("No video device selected")
             return
 
+        self._audio_meter.clear()
+
         self._session = AVF.AVCaptureSession.alloc().init()
 
         if self._session.canSetSessionPreset_(AVF.AVCaptureSessionPresetInputPriority):
@@ -621,6 +619,7 @@ class FruitcapGUI(QMainWindow):
             self._session = None
             self._delegate = None
             self._previewing = False
+            self._audio_meter.clear()
 
     def _toggle_recording(self):
         if self._recording:
@@ -742,9 +741,9 @@ class FruitcapGUI(QMainWindow):
             f"frames: {frames}{dropped_str}  size: {size_str}"
         )
 
-    def _on_audio_levels(self, levels):
-        """Update VU meter from audio callback (runs on main thread via signal)."""
-        self._vu_meter.set_levels_db(levels)
+    def _on_audio_levels(self, meter_data):
+        """Update audio meter from audio callback (runs on the main thread)."""
+        self._audio_meter.set_levels_db(meter_data)
 
     def _set_settings_enabled(self, enabled):
         """Enable/disable all settings controls."""
@@ -782,6 +781,34 @@ class FruitcapGUI(QMainWindow):
         event.accept()
 
 
+def install_signal_handlers(app, window):
+    """Translate terminal signals into a clean Qt shutdown."""
+    pending_signal = {"signum": None}
+
+    def request_shutdown(signum, _frame):
+        pending_signal["signum"] = signum
+
+    def drain_shutdown_request():
+        signum = pending_signal["signum"]
+        if signum is None:
+            return
+        pending_signal["signum"] = None
+        app._signal_exit_code = 128 + signum
+        if window.isVisible():
+            window.close()
+        else:
+            app.quit()
+
+    poll_timer = QTimer(app)
+    poll_timer.setInterval(100)
+    poll_timer.timeout.connect(drain_shutdown_request)
+    poll_timer.start()
+
+    signal.signal(signal.SIGINT, request_shutdown)
+    signal.signal(signal.SIGTERM, request_shutdown)
+    return poll_timer
+
+
 def main():
     # Suppress fruitcap's quiet-mode print wrapper in GUI context
     import fruitcap
@@ -789,11 +816,14 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("fruitcap")
+    app._signal_exit_code = 0
 
     window = FruitcapGUI()
     window.show()
+    app._signal_poll_timer = install_signal_handlers(app, window)
 
-    sys.exit(app.exec_())
+    exit_code = app.exec_()
+    sys.exit(app._signal_exit_code or exit_code)
 
 
 if __name__ == "__main__":

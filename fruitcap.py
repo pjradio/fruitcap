@@ -114,6 +114,136 @@ class AudioStreamBasicDescription(ctypes.Structure):
     ]
 
 
+class AudioSamplePeakAnalyzer:
+    """Extract sample peak levels from capture audio sample buffers."""
+
+    _FLAG_IS_FLOAT = 1
+    _FLAG_IS_NON_INTERLEAVED = 1 << 5
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self._format_checked = False
+        self._sample_ctype = None
+        self._bytes_per_sample = 0
+        self._peak_divisor = 1.0
+        self._channels_per_frame = 1
+        self._non_interleaved = False
+        self.format_error = None
+
+    @staticmethod
+    def peaks_to_dbfs(peaks):
+        if peaks is None:
+            return None
+        return [20.0 * math.log10(max(peak, 1e-6)) for peak in peaks]
+
+    def measure_overall_peak(self, sample_buffer):
+        peaks = self.measure_channel_peaks(sample_buffer)
+        if peaks is None:
+            return None
+        return max(peaks, default=0.0)
+
+    def measure_channel_peaks(self, sample_buffer, channel_count_hint=None):
+        buf_ptr = objc.pyobjc_id(sample_buffer)
+        if not self._ensure_format(buf_ptr, channel_count_hint=channel_count_hint):
+            return None
+
+        block_buf = _cm_lib.CMSampleBufferGetDataBuffer(buf_ptr)
+        if not block_buf:
+            return None
+
+        length = _cm_lib.CMBlockBufferGetDataLength(block_buf)
+        if length == 0:
+            return None
+
+        data_out = ctypes.c_void_p()
+        err = _cm_lib.CMBlockBufferGetDataPointer(
+            block_buf, 0, None, None, ctypes.byref(data_out)
+        )
+        if err != 0 or not data_out.value:
+            return None
+
+        num_samples = length // self._bytes_per_sample
+        if num_samples == 0:
+            return None
+
+        samples = (self._sample_ctype * num_samples).from_address(data_out.value)
+        channel_count = max(1, self._channels_per_frame)
+        peaks = [0.0] * channel_count
+
+        if self._non_interleaved:
+            samples_per_channel = num_samples // channel_count
+            if samples_per_channel == 0:
+                return None
+            for channel_index in range(channel_count):
+                start = channel_index * samples_per_channel
+                end = start + samples_per_channel
+                channel_peak = 0.0
+                for sample_index in range(start, end):
+                    value = abs(samples[sample_index]) / self._peak_divisor
+                    if value > channel_peak:
+                        channel_peak = value
+                peaks[channel_index] = channel_peak
+        else:
+            for sample_index, sample in enumerate(samples):
+                value = abs(sample) / self._peak_divisor
+                channel_index = sample_index % channel_count
+                if value > peaks[channel_index]:
+                    peaks[channel_index] = value
+
+        return peaks
+
+    def _ensure_format(self, buf_ptr, channel_count_hint=None):
+        if self._format_checked:
+            return self._sample_ctype is not None
+
+        self._format_checked = True
+        fmt = _cm_lib.CMSampleBufferGetFormatDescription(buf_ptr)
+        if fmt:
+            asbd_ptr = _cm_lib.CMAudioFormatDescriptionGetStreamBasicDescription(fmt)
+            if asbd_ptr:
+                asbd = AudioStreamBasicDescription.from_address(asbd_ptr)
+                is_float = bool(asbd.mFormatFlags & self._FLAG_IS_FLOAT)
+                self._non_interleaved = bool(
+                    asbd.mFormatFlags & self._FLAG_IS_NON_INTERLEAVED
+                )
+                self._channels_per_frame = max(
+                    1,
+                    int(asbd.mChannelsPerFrame or channel_count_hint or 1),
+                )
+                bits = asbd.mBitsPerChannel
+
+                if is_float and bits == 32:
+                    self._sample_ctype = ctypes.c_float
+                    self._bytes_per_sample = 4
+                    self._peak_divisor = 1.0
+                elif is_float and bits == 64:
+                    self._sample_ctype = ctypes.c_double
+                    self._bytes_per_sample = 8
+                    self._peak_divisor = 1.0
+                elif not is_float and bits == 16:
+                    self._sample_ctype = ctypes.c_int16
+                    self._bytes_per_sample = 2
+                    self._peak_divisor = 32768.0
+                elif not is_float and bits == 32:
+                    self._sample_ctype = ctypes.c_int32
+                    self._bytes_per_sample = 4
+                    self._peak_divisor = 2147483648.0
+                else:
+                    self.format_error = f"{'float' if is_float else 'int'} {bits}-bit"
+                    return False
+
+                return True
+
+        self._sample_ctype = ctypes.c_float
+        self._bytes_per_sample = 4
+        self._peak_divisor = 1.0
+        self._channels_per_frame = max(1, int(channel_count_hint or 1))
+        self._non_interleaved = False
+        return True
+
+
 def _vt_cfstr(name):
     """Load a CFString constant from VideoToolbox."""
     return ctypes.c_void_p.in_dll(_vt_lib, name).value
@@ -662,10 +792,7 @@ class Recorder:
         self._vu_peak = 0.0
         self._vu_clip_time = 0.0
         self._vu_last_time = 0.0
-        self._vu_format_checked = False
-        self._vu_sample_ctype = None   # ctypes type for one sample
-        self._vu_bytes_per_sample = 0
-        self._vu_peak_divisor = 1.0    # normalizes integer samples to 0.0–1.0
+        self._vu_peak_analyzer = AudioSamplePeakAnalyzer()
 
     def find_device(self, selector=None):
         devices = get_devices(AVF.AVMediaTypeVideo)
@@ -1389,63 +1516,15 @@ class Recorder:
 
     def _measure_audio_peak(self, sample_buffer):
         """Extract peak audio level from a sample buffer and update VU state."""
-        buf_ptr = objc.pyobjc_id(sample_buffer)
-
-        # Detect sample format on first call
-        if not self._vu_format_checked:
-            self._vu_format_checked = True
-            fmt = _cm_lib.CMSampleBufferGetFormatDescription(buf_ptr)
-            if fmt:
-                asbd_ptr = _cm_lib.CMAudioFormatDescriptionGetStreamBasicDescription(fmt)
-                if asbd_ptr:
-                    asbd = AudioStreamBasicDescription.from_address(asbd_ptr)
-                    is_float = bool(asbd.mFormatFlags & 1)  # kAudioFormatFlagIsFloat
-                    bits = asbd.mBitsPerChannel
-                    if is_float and bits == 32:
-                        self._vu_sample_ctype = ctypes.c_float
-                        self._vu_bytes_per_sample = 4
-                        self._vu_peak_divisor = 1.0
-                    elif is_float and bits == 64:
-                        self._vu_sample_ctype = ctypes.c_double
-                        self._vu_bytes_per_sample = 8
-                        self._vu_peak_divisor = 1.0
-                    elif not is_float and bits == 16:
-                        self._vu_sample_ctype = ctypes.c_int16
-                        self._vu_bytes_per_sample = 2
-                        self._vu_peak_divisor = 32768.0
-                    elif not is_float and bits == 32:
-                        self._vu_sample_ctype = ctypes.c_int32
-                        self._vu_bytes_per_sample = 4
-                        self._vu_peak_divisor = 2147483648.0
-                    else:
-                        log(f"Warning: VU meter unsupported audio format "
-                            f"({'float' if is_float else 'int'} {bits}-bit); disabling.")
-                        self._vu_enabled = False
-                        return
-            if self._vu_sample_ctype is None:
-                # Could not read format description; assume float32
-                self._vu_sample_ctype = ctypes.c_float
-                self._vu_bytes_per_sample = 4
-                self._vu_peak_divisor = 1.0
-
-        block_buf = _cm_lib.CMSampleBufferGetDataBuffer(buf_ptr)
-        if not block_buf:
+        buf_peak = self._vu_peak_analyzer.measure_overall_peak(sample_buffer)
+        if buf_peak is None:
+            if self._vu_peak_analyzer.format_error:
+                log(
+                    "Warning: VU meter unsupported audio format "
+                    f"({self._vu_peak_analyzer.format_error}); disabling."
+                )
+                self._vu_enabled = False
             return
-        length = _cm_lib.CMBlockBufferGetDataLength(block_buf)
-        if length == 0:
-            return
-        data_out = ctypes.c_void_p()
-        err = _cm_lib.CMBlockBufferGetDataPointer(
-            block_buf, 0, None, None, ctypes.byref(data_out)
-        )
-        if err != 0 or not data_out.value:
-            return
-
-        num_samples = length // self._vu_bytes_per_sample
-        if num_samples == 0:
-            return
-        samples = (self._vu_sample_ctype * num_samples).from_address(data_out.value)
-        buf_peak = max((abs(s) for s in samples), default=0.0) / self._vu_peak_divisor
 
         if buf_peak >= 1.0:
             self._vu_clip_time = time.monotonic()

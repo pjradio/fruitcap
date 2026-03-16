@@ -392,6 +392,14 @@ class FruitcapGUI(QMainWindow):
         self._split_size_edit.setMaximumWidth(80)
         self._split_size_edit.setPlaceholderText("e.g. 500m, 2g")
         add_row(output_form, "Split size:", self._split_size_edit)
+        self._stop_after_edit = QLineEdit()
+        self._stop_after_edit.setMaximumWidth(80)
+        self._stop_after_edit.setPlaceholderText("seconds")
+        add_row(output_form, "Stop after:", self._stop_after_edit)
+        self._max_frames_edit = QLineEdit()
+        self._max_frames_edit.setMaximumWidth(80)
+        self._max_frames_edit.setPlaceholderText("frames")
+        add_row(output_form, "Max frames:", self._max_frames_edit)
         output_group.setLayout(output_form)
         settings_layout.addWidget(output_group)
 
@@ -703,6 +711,31 @@ class FruitcapGUI(QMainWindow):
                 self._recorder = None
                 return
 
+        # Apply auto-stop options
+        stop_after = self._stop_after_edit.text().strip()
+        if stop_after:
+            try:
+                max_seconds = float(stop_after)
+                if max_seconds <= 0:
+                    raise ValueError("must be positive")
+                self._recorder.max_seconds = max_seconds
+            except ValueError:
+                self._statusbar.showMessage(f"Invalid stop-after duration: {stop_after!r}")
+                self._recorder = None
+                return
+
+        max_frames = self._max_frames_edit.text().strip()
+        if max_frames:
+            try:
+                n = int(max_frames)
+                if n <= 0:
+                    raise ValueError("must be positive")
+                self._recorder.max_frames = n
+            except ValueError:
+                self._statusbar.showMessage(f"Invalid max frames: {max_frames!r}")
+                self._recorder = None
+                return
+
         # Adopt the running session — no reconfiguration needed
         self._recorder.adopt_session(self._session, self._delegate)
         self._recorder.setup_writer()
@@ -812,6 +845,7 @@ class FruitcapGUI(QMainWindow):
             self._audio_codec_combo, self._audio_bitrate_edit,
             self._audio_sample_rate_combo, self._audio_channels_combo,
             self._output_edit, self._split_duration_edit, self._split_size_edit,
+            self._stop_after_edit, self._max_frames_edit,
         ):
             widget.setEnabled(enabled)
 

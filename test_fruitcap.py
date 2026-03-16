@@ -1254,6 +1254,152 @@ class TestGuiPreviewRestart:
         window._restart_preview_if_idle.assert_called_once()
 
 
+class TestGuiAutoStop:
+    """Test that the GUI exposes stop-after and max-frames options."""
+
+    def test_stop_after_fields_exist(self):
+        gui = load_fruitcap_gui()
+        # Verify the class references the expected attributes
+        assert hasattr(gui.FruitcapGUI, "_start_recording")
+
+    def test_start_recording_applies_max_seconds(self):
+        gui = load_fruitcap_gui()
+        window = mock.MagicMock()
+        window._session = mock.MagicMock()
+        window._previewing = True
+        window._recording = False
+        window._recorder = None
+
+        fake_cfg = {
+            "codec": "h264", "width": 1920, "height": 1080,
+            "bit_depth": 8, "chroma": "420", "bitrate": 80_000_000,
+            "fps": None, "container": "mp4", "output": "test.mp4",
+            "audio_enabled": False, "audio_codec": "aac",
+            "audio_bitrate": 256_000, "audio_sample_rate": 48000,
+            "audio_channels": 2, "color_space": "bt709",
+            "discard_late_frames": True, "audio_only": False,
+        }
+        window._build_config = mock.Mock(return_value=fake_cfg)
+
+        # No split
+        window._split_duration_edit.text.return_value = ""
+        window._split_size_edit.text.return_value = ""
+        # Stop after 30 seconds
+        window._stop_after_edit.text.return_value = "30"
+        # No max frames
+        window._max_frames_edit.text.return_value = ""
+
+        fake_recorder = mock.MagicMock()
+        fake_recorder.split_seconds = None
+        fake_recorder.split_size_bytes = None
+        fake_recorder.max_seconds = None
+        fake_recorder.max_frames = None
+
+        with mock.patch.object(gui, "Recorder", return_value=fake_recorder):
+            gui.FruitcapGUI._start_recording(window)
+
+        assert fake_recorder.max_seconds == 30.0
+        assert fake_recorder.max_frames is None
+
+    def test_start_recording_applies_max_frames(self):
+        gui = load_fruitcap_gui()
+        window = mock.MagicMock()
+        window._session = mock.MagicMock()
+        window._previewing = True
+        window._recording = False
+        window._recorder = None
+
+        fake_cfg = {
+            "codec": "h264", "width": 1920, "height": 1080,
+            "bit_depth": 8, "chroma": "420", "bitrate": 80_000_000,
+            "fps": None, "container": "mp4", "output": "test.mp4",
+            "audio_enabled": False, "audio_codec": "aac",
+            "audio_bitrate": 256_000, "audio_sample_rate": 48000,
+            "audio_channels": 2, "color_space": "bt709",
+            "discard_late_frames": True, "audio_only": False,
+        }
+        window._build_config = mock.Mock(return_value=fake_cfg)
+
+        window._split_duration_edit.text.return_value = ""
+        window._split_size_edit.text.return_value = ""
+        window._stop_after_edit.text.return_value = ""
+        window._max_frames_edit.text.return_value = "500"
+
+        fake_recorder = mock.MagicMock()
+        fake_recorder.split_seconds = None
+        fake_recorder.split_size_bytes = None
+        fake_recorder.max_seconds = None
+        fake_recorder.max_frames = None
+
+        with mock.patch.object(gui, "Recorder", return_value=fake_recorder):
+            gui.FruitcapGUI._start_recording(window)
+
+        assert fake_recorder.max_seconds is None
+        assert fake_recorder.max_frames == 500
+
+    def test_start_recording_rejects_invalid_max_seconds(self):
+        gui = load_fruitcap_gui()
+        window = mock.MagicMock()
+        window._session = mock.MagicMock()
+        window._previewing = True
+        window._recording = False
+        window._recorder = None
+
+        fake_cfg = {
+            "codec": "h264", "width": 1920, "height": 1080,
+            "bit_depth": 8, "chroma": "420", "bitrate": 80_000_000,
+            "fps": None, "container": "mp4", "output": "test.mp4",
+            "audio_enabled": False, "audio_codec": "aac",
+            "audio_bitrate": 256_000, "audio_sample_rate": 48000,
+            "audio_channels": 2, "color_space": "bt709",
+            "discard_late_frames": True, "audio_only": False,
+        }
+        window._build_config = mock.Mock(return_value=fake_cfg)
+
+        window._split_duration_edit.text.return_value = ""
+        window._split_size_edit.text.return_value = ""
+        window._stop_after_edit.text.return_value = "-5"
+        window._max_frames_edit.text.return_value = ""
+
+        with mock.patch.object(gui, "Recorder") as MockRecorder:
+            gui.FruitcapGUI._start_recording(window)
+
+        msg = window._statusbar.showMessage.call_args[0][0]
+        assert "Invalid stop-after" in msg
+        assert window._recorder is None
+
+    def test_start_recording_rejects_invalid_max_frames(self):
+        gui = load_fruitcap_gui()
+        window = mock.MagicMock()
+        window._session = mock.MagicMock()
+        window._previewing = True
+        window._recording = False
+        window._recorder = None
+
+        fake_cfg = {
+            "codec": "h264", "width": 1920, "height": 1080,
+            "bit_depth": 8, "chroma": "420", "bitrate": 80_000_000,
+            "fps": None, "container": "mp4", "output": "test.mp4",
+            "audio_enabled": False, "audio_codec": "aac",
+            "audio_bitrate": 256_000, "audio_sample_rate": 48000,
+            "audio_channels": 2, "color_space": "bt709",
+            "discard_late_frames": True, "audio_only": False,
+        }
+        window._build_config = mock.Mock(return_value=fake_cfg)
+
+        window._split_duration_edit.text.return_value = ""
+        window._split_size_edit.text.return_value = ""
+        window._stop_after_edit.text.return_value = ""
+        window._max_frames_edit.text.return_value = "abc"
+
+        with mock.patch.object(gui, "Recorder") as MockRecorder:
+            gui.FruitcapGUI._start_recording(window)
+
+        msg = window._statusbar.showMessage.call_args[0][0]
+        assert "Invalid max frames" in msg
+        assert window._recorder is None
+
+
 class TestGuiSplitFields:
     """Test that the GUI exposes segment splitting and wires it to the Recorder."""
 

@@ -1203,6 +1203,57 @@ class TestRunHeadless:
         assert recorder.stop_calls == 1
 
 
+class TestGuiPreviewRestart:
+    """Test that changing capture-affecting settings restarts the preview."""
+
+    def test_restart_preview_if_idle_stops_and_restarts(self):
+        gui = load_fruitcap_gui()
+        window = mock.MagicMock()
+        window._previewing = True
+        window._recording = False
+        timer_callbacks = []
+
+        def fake_singleShot(ms, callback):
+            timer_callbacks.append(callback)
+
+        with mock.patch.object(gui, "QTimer") as MockTimer:
+            MockTimer.singleShot = fake_singleShot
+            gui.FruitcapGUI._restart_preview_if_idle(window)
+
+        window._stop_preview.assert_called_once()
+        assert len(timer_callbacks) == 1
+        assert timer_callbacks[0] == window._start_preview
+
+    def test_restart_preview_skipped_when_recording(self):
+        gui = load_fruitcap_gui()
+        window = mock.MagicMock()
+        window._previewing = True
+        window._recording = True
+
+        gui.FruitcapGUI._restart_preview_if_idle(window)
+
+        window._stop_preview.assert_not_called()
+
+    def test_restart_preview_skipped_when_not_previewing(self):
+        gui = load_fruitcap_gui()
+        window = mock.MagicMock()
+        window._previewing = False
+        window._recording = False
+
+        gui.FruitcapGUI._restart_preview_if_idle(window)
+
+        window._stop_preview.assert_not_called()
+
+    def test_on_device_changed_calls_restart(self):
+        gui = load_fruitcap_gui()
+        window = mock.MagicMock()
+
+        gui.FruitcapGUI._on_device_changed(window, 0)
+
+        window._auto_select_audio_device.assert_called_once()
+        window._restart_preview_if_idle.assert_called_once()
+
+
 class TestGuiSplitFields:
     """Test that the GUI exposes segment splitting and wires it to the Recorder."""
 

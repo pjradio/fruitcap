@@ -291,9 +291,11 @@ class FruitcapGUI(QMainWindow):
         self._video_device_combo.currentIndexChanged.connect(self._on_device_changed)
         add_row(device_form, "Video:", self._video_device_combo)
         self._audio_device_combo = QComboBox()
+        self._audio_device_combo.currentIndexChanged.connect(self._restart_preview_if_idle)
         add_row(device_form, "Audio:", self._audio_device_combo)
         self._audio_check = QCheckBox("Capture audio")
         self._audio_check.setChecked(True)
+        self._audio_check.stateChanged.connect(self._restart_preview_if_idle)
         add_row(device_form, "", self._audio_check)
         device_group.setLayout(device_form)
         settings_layout.addWidget(device_group)
@@ -320,6 +322,7 @@ class FruitcapGUI(QMainWindow):
 
         self._fps_combo = QComboBox()
         self._fps_combo.addItems(["Device default", "60", "59.94", "50", "30", "29.97", "25", "24", "23.976"])
+        self._fps_combo.currentIndexChanged.connect(self._restart_preview_if_idle)
         add_row(video_form, "Frame rate:", self._fps_combo)
 
         self._bitrate_edit = QLineEdit("80m")
@@ -440,6 +443,10 @@ class FruitcapGUI(QMainWindow):
     def _on_device_changed(self, index):
         """Restart preview and auto-select matching audio device."""
         self._auto_select_audio_device()
+        self._restart_preview_if_idle()
+
+    def _restart_preview_if_idle(self, _=None):
+        """Restart preview session if previewing but not recording."""
         if self._previewing and not self._recording:
             self._stop_preview()
             QTimer.singleShot(100, self._start_preview)
@@ -581,6 +588,23 @@ class FruitcapGUI(QMainWindow):
 
         if self._session.canAddInput_(dev_input):
             self._session.addInput_(dev_input)
+
+        # Lock device frame rate if a specific FPS is selected
+        fps_text = self._fps_combo.currentText()
+        if fps_text and fps_text != "Device default":
+            try:
+                fps = float(fps_text)
+                if fps == int(fps):
+                    duration = CoreMedia.CMTimeMake(1, int(fps))
+                else:
+                    duration = CoreMedia.CMTimeMake(1001, round(fps * 1001))
+                success, error = device.lockForConfiguration_(None)
+                if success:
+                    device.setActiveVideoMinFrameDuration_(duration)
+                    device.setActiveVideoMaxFrameDuration_(duration)
+                    device.unlockForConfiguration()
+            except (ValueError, AttributeError):
+                pass
 
         # Set up delegate and video data output (buffers are discarded
         # until a recorder is attached via delegate.recorder)

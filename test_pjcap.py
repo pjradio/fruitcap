@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for fruitcap improvements."""
+"""Tests for pjcap improvements."""
 
 import configparser
 import ctypes
@@ -17,21 +17,21 @@ from unittest import mock
 
 import pytest
 
-# We need to mock AVFoundation and related macOS frameworks before importing fruitcap,
+# We need to mock AVFoundation and related macOS frameworks before importing pjcap,
 # since tests may run in environments without these frameworks (CI, etc.)
-# But on macOS where fruitcap actually runs, these are available.
-# We'll import fruitcap directly and test its pure-logic functions.
+# But on macOS where pjcap actually runs, these are available.
+# We'll import pjcap directly and test its pure-logic functions.
 
-import fruitcap
+import pjcap
 
 
-def load_fruitcap_gui():
+def load_pjcap_gui():
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    module_name = "fruitcap_gui"
+    module_name = "pjcap_gui"
     if module_name in sys.modules:
         return sys.modules[module_name]
 
-    path = os.path.join(os.path.dirname(__file__), "fruitcap-gui.py")
+    path = os.path.join(os.path.dirname(__file__), "pjcap-gui.py")
     spec = importlib.util.spec_from_file_location(module_name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
@@ -46,16 +46,16 @@ class TestAudioSamplePeakAnalyzer:
     def _patch_audio_buffer(self, monkeypatch, samples, asbd):
         block_buf = object()
 
-        monkeypatch.setattr(fruitcap.objc, "pyobjc_id", lambda _: 12345)
-        monkeypatch.setattr(fruitcap._cm_lib, "CMSampleBufferGetFormatDescription", lambda _: 1)
+        monkeypatch.setattr(pjcap.objc, "pyobjc_id", lambda _: 12345)
+        monkeypatch.setattr(pjcap._cm_lib, "CMSampleBufferGetFormatDescription", lambda _: 1)
         monkeypatch.setattr(
-            fruitcap._cm_lib,
+            pjcap._cm_lib,
             "CMAudioFormatDescriptionGetStreamBasicDescription",
             lambda _: ctypes.addressof(asbd),
         )
-        monkeypatch.setattr(fruitcap._cm_lib, "CMSampleBufferGetDataBuffer", lambda _: block_buf)
+        monkeypatch.setattr(pjcap._cm_lib, "CMSampleBufferGetDataBuffer", lambda _: block_buf)
         monkeypatch.setattr(
-            fruitcap._cm_lib,
+            pjcap._cm_lib,
             "CMBlockBufferGetDataLength",
             lambda _: ctypes.sizeof(samples),
         )
@@ -65,15 +65,15 @@ class TestAudioSamplePeakAnalyzer:
             return 0
 
         monkeypatch.setattr(
-            fruitcap._cm_lib,
+            pjcap._cm_lib,
             "CMBlockBufferGetDataPointer",
             fake_get_data_pointer,
         )
 
     def test_measure_channel_peaks_interleaved_int16(self, monkeypatch):
-        analyzer = fruitcap.AudioSamplePeakAnalyzer()
+        analyzer = pjcap.AudioSamplePeakAnalyzer()
         samples = (ctypes.c_int16 * 6)(1000, -2000, 3000, -4000, 500, -600)
-        asbd = fruitcap.AudioStreamBasicDescription()
+        asbd = pjcap.AudioStreamBasicDescription()
         asbd.mFormatFlags = 0
         asbd.mChannelsPerFrame = 2
         asbd.mBitsPerChannel = 16
@@ -85,11 +85,11 @@ class TestAudioSamplePeakAnalyzer:
         assert analyzer.measure_overall_peak(object()) == pytest.approx(4000 / 32768.0)
 
     def test_measure_channel_peaks_non_interleaved_float32(self, monkeypatch):
-        analyzer = fruitcap.AudioSamplePeakAnalyzer()
+        analyzer = pjcap.AudioSamplePeakAnalyzer()
         samples = (ctypes.c_float * 6)(0.1, -0.5, 0.2, -0.25, 0.75, -0.4)
-        asbd = fruitcap.AudioStreamBasicDescription()
-        asbd.mFormatFlags = fruitcap.AudioSamplePeakAnalyzer._FLAG_IS_FLOAT | (
-            fruitcap.AudioSamplePeakAnalyzer._FLAG_IS_NON_INTERLEAVED
+        asbd = pjcap.AudioStreamBasicDescription()
+        asbd.mFormatFlags = pjcap.AudioSamplePeakAnalyzer._FLAG_IS_FLOAT | (
+            pjcap.AudioSamplePeakAnalyzer._FLAG_IS_NON_INTERLEAVED
         )
         asbd.mChannelsPerFrame = 2
         asbd.mBitsPerChannel = 32
@@ -98,45 +98,45 @@ class TestAudioSamplePeakAnalyzer:
         peaks = analyzer.measure_channel_peaks(object())
 
         assert peaks == pytest.approx([0.5, 0.75])
-        assert fruitcap.AudioSamplePeakAnalyzer.peaks_to_dbfs(peaks) == pytest.approx(
-            [20.0 * fruitcap.math.log10(0.5), 20.0 * fruitcap.math.log10(0.75)]
+        assert pjcap.AudioSamplePeakAnalyzer.peaks_to_dbfs(peaks) == pytest.approx(
+            [20.0 * pjcap.math.log10(0.5), 20.0 * pjcap.math.log10(0.75)]
         )
 
 # ── Bitrate shorthand ──
 
 class TestParseBitrate:
     def test_plain_integer(self):
-        assert fruitcap.parse_bitrate("80000000") == 80_000_000
+        assert pjcap.parse_bitrate("80000000") == 80_000_000
 
     def test_megabit_lowercase(self):
-        assert fruitcap.parse_bitrate("80m") == 80_000_000
+        assert pjcap.parse_bitrate("80m") == 80_000_000
 
     def test_megabit_uppercase(self):
-        assert fruitcap.parse_bitrate("150M") == 150_000_000
+        assert pjcap.parse_bitrate("150M") == 150_000_000
 
     def test_kilobit(self):
-        assert fruitcap.parse_bitrate("256k") == 256_000
+        assert pjcap.parse_bitrate("256k") == 256_000
 
     def test_gigabit(self):
-        assert fruitcap.parse_bitrate("1g") == 1_000_000_000
+        assert pjcap.parse_bitrate("1g") == 1_000_000_000
 
     def test_fractional_megabit(self):
-        assert fruitcap.parse_bitrate("2.5m") == 2_500_000
+        assert pjcap.parse_bitrate("2.5m") == 2_500_000
 
     def test_empty_raises(self):
         with pytest.raises(ValueError):
-            fruitcap.parse_bitrate("")
+            pjcap.parse_bitrate("")
 
     def test_invalid_raises(self):
         with pytest.raises(ValueError):
-            fruitcap.parse_bitrate("abc")
+            pjcap.parse_bitrate("abc")
 
     def test_load_config_with_shorthand(self):
         """Config file with shorthand bitrate values should parse correctly."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".cfg", delete=False) as f:
             f.write("[capture]\nbitrate = 80m\n[audio]\nbitrate = 256k\n")
             f.flush()
-            cfg = fruitcap.load_config(f.name)
+            cfg = pjcap.load_config(f.name)
         os.unlink(f.name)
         assert cfg["bitrate"] == 80_000_000
         assert cfg["audio_bitrate"] == 256_000
@@ -154,39 +154,39 @@ class TestCliOverrides:
 
     def test_override_codec(self):
         path = self._write_cfg()
-        cfg = fruitcap.load_config(path, overrides={"codec": "h265"})
+        cfg = pjcap.load_config(path, overrides={"codec": "h265"})
         os.unlink(path)
         assert cfg["codec"] == "h265"
 
     def test_override_bitrate(self):
         path = self._write_cfg()
-        cfg = fruitcap.load_config(path, overrides={"bitrate": "100m"})
+        cfg = pjcap.load_config(path, overrides={"bitrate": "100m"})
         os.unlink(path)
         assert cfg["bitrate"] == 100_000_000
 
     def test_override_resolution(self):
         path = self._write_cfg()
-        cfg = fruitcap.load_config(path, overrides={"resolution": "1080p"})
+        cfg = pjcap.load_config(path, overrides={"resolution": "1080p"})
         os.unlink(path)
         assert cfg["width"] == 1920
         assert cfg["height"] == 1080
 
     def test_override_output(self):
         path = self._write_cfg()
-        cfg = fruitcap.load_config(path, overrides={"output": "my_video.mp4"})
+        cfg = pjcap.load_config(path, overrides={"output": "my_video.mp4"})
         os.unlink(path)
         assert cfg["output"] == "my_video.mp4"
 
     def test_override_fps(self):
         path = self._write_cfg()
-        cfg = fruitcap.load_config(path, overrides={"fps": "29.97"})
+        cfg = pjcap.load_config(path, overrides={"fps": "29.97"})
         os.unlink(path)
         assert cfg["fps"] == pytest.approx(29.97)
 
     def test_config_path(self):
         """--config flag should load from the specified path."""
         path = self._write_cfg("[capture]\nresolution = 720p\ncodec = h264\n[audio]\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["width"] == 1280
         assert cfg["height"] == 720
@@ -194,20 +194,20 @@ class TestCliOverrides:
     def test_no_overrides(self):
         """When no overrides, config file values are used."""
         path = self._write_cfg("[capture]\ncodec = h264\nbitrate = 50m\n[audio]\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["codec"] == "h264"
         assert cfg["bitrate"] == 50_000_000
 
     def test_default_output_template_is_timestamped(self):
         path = self._write_cfg("[capture]\ncodec = h264\n[audio]\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["output"] == "capture-%d-%t.mp4"
 
     def test_output_template_tokens_load_from_config(self):
         path = self._write_cfg("[capture]\noutput = custom_%d_%t.mov\n[audio]\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["output"] == "custom_%d_%t.mov"
 
@@ -225,7 +225,7 @@ class TestSigtermHandling:
             recorder = mock.MagicMock()
             recorder.running = False  # So the loop exits immediately
             with mock.patch('builtins.input', side_effect=EOFError):
-                fruitcap.run_headless(recorder)
+                pjcap.run_headless(recorder)
             handler = signal.getsignal(signal.SIGTERM)
             assert handler is not signal.SIG_DFL, "SIGTERM handler should be installed"
         finally:
@@ -244,38 +244,38 @@ class TestDeviceSelection:
     def test_find_device_by_index(self):
         dev0 = self._make_mock_device("Camera A")
         dev1 = self._make_mock_device("Camera B")
-        result = fruitcap.find_device_by_selector([dev0, dev1], "1", "video")
+        result = pjcap.find_device_by_selector([dev0, dev1], "1", "video")
         assert result is dev1
 
     def test_find_device_by_name(self):
         dev0 = self._make_mock_device("FaceTime HD Camera")
         dev1 = self._make_mock_device("Avid DNxIO")
-        result = fruitcap.find_device_by_selector([dev0, dev1], "dnxio", "video")
+        result = pjcap.find_device_by_selector([dev0, dev1], "dnxio", "video")
         assert result is dev1
 
     def test_find_device_default_first(self):
         dev0 = self._make_mock_device("Camera A")
-        result = fruitcap.find_device_by_selector([dev0], None, "video")
+        result = pjcap.find_device_by_selector([dev0], None, "video")
         assert result is dev0
 
     def test_find_device_no_devices(self):
-        result = fruitcap.find_device_by_selector([], None, "video")
+        result = pjcap.find_device_by_selector([], None, "video")
         assert result is None
 
     def test_find_device_bad_name_exits(self):
         dev0 = self._make_mock_device("Camera A")
         with pytest.raises(SystemExit):
-            fruitcap.find_device_by_selector([dev0], "nonexistent", "video")
+            pjcap.find_device_by_selector([dev0], "nonexistent", "video")
 
     def test_find_device_index_out_of_range_exits(self):
         dev0 = self._make_mock_device("Camera A")
         with pytest.raises(SystemExit):
-            fruitcap.find_device_by_selector([dev0], "5", "video")
+            pjcap.find_device_by_selector([dev0], "5", "video")
 
     def test_list_devices(self):
         dev0 = self._make_mock_device("Camera A", "uid0")
         dev1 = self._make_mock_device("Camera B", "uid1")
-        result = fruitcap.list_devices([dev0, dev1])
+        result = pjcap.list_devices([dev0, dev1])
         assert len(result) == 2
         assert result[0] == (0, "Camera A", "uid0")
         assert result[1] == (1, "Camera B", "uid1")
@@ -285,13 +285,13 @@ class TestDeviceSelection:
 
 class TestOutputFilename:
     def test_date_token(self):
-        path = fruitcap.generate_output_path("capture_%d.mp4")
+        path = pjcap.generate_output_path("capture_%d.mp4")
         today = datetime.date.today().strftime("%Y%m%d")
         assert today in path
         assert path.endswith(".mp4")
 
     def test_time_token(self):
-        path = fruitcap.generate_output_path("capture_%t.mp4")
+        path = pjcap.generate_output_path("capture_%t.mp4")
         # Should contain 6-digit time string
         basename = os.path.basename(path)
         # Extract the time portion between 'capture_' and '.mp4'
@@ -300,19 +300,19 @@ class TestOutputFilename:
         assert time_part.isdigit()
 
     def test_both_tokens(self):
-        path = fruitcap.generate_output_path("cap_%d_%t.mp4")
+        path = pjcap.generate_output_path("cap_%d_%t.mp4")
         today = datetime.date.today().strftime("%Y%m%d")
         assert today in path
 
     def test_no_tokens(self):
-        path = fruitcap.generate_output_path("capture.mp4")
+        path = pjcap.generate_output_path("capture.mp4")
         assert path == "capture.mp4"
 
     def test_no_overwrite_new_file(self):
         """When file doesn't exist, no_overwrite returns path as-is."""
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "capture.mp4")
-            result = fruitcap.generate_output_path(path, no_overwrite=True)
+            result = pjcap.generate_output_path(path, no_overwrite=True)
             assert result == path
 
     def test_no_overwrite_existing_file(self):
@@ -320,7 +320,7 @@ class TestOutputFilename:
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "capture.mp4")
             open(path, "w").close()  # create the file
-            result = fruitcap.generate_output_path(path, no_overwrite=True)
+            result = pjcap.generate_output_path(path, no_overwrite=True)
             assert result == os.path.join(d, "capture_1.mp4")
 
     def test_no_overwrite_multiple_existing(self):
@@ -329,7 +329,7 @@ class TestOutputFilename:
             path = os.path.join(d, "capture.mp4")
             open(path, "w").close()
             open(os.path.join(d, "capture_1.mp4"), "w").close()
-            result = fruitcap.generate_output_path(path, no_overwrite=True)
+            result = pjcap.generate_output_path(path, no_overwrite=True)
             assert result == os.path.join(d, "capture_2.mp4")
 
     def test_no_overwrite_split_checks_first_segment(self):
@@ -338,7 +338,7 @@ class TestOutputFilename:
             path = os.path.join(d, "capture.mp4")
             open(os.path.join(d, "capture_001.mp4"), "w").close()
             open(os.path.join(d, "capture_1_001.mp4"), "w").close()
-            result = fruitcap.generate_output_path(path, no_overwrite=True, split_segments=True)
+            result = pjcap.generate_output_path(path, no_overwrite=True, split_segments=True)
             assert result == os.path.join(d, "capture_2.mp4")
 
     def test_overwrite_mode_returns_original(self):
@@ -346,7 +346,7 @@ class TestOutputFilename:
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "capture.mp4")
             open(path, "w").close()
-            result = fruitcap.generate_output_path(path, no_overwrite=False)
+            result = pjcap.generate_output_path(path, no_overwrite=False)
             assert result == path
 
 
@@ -360,7 +360,7 @@ class TestListFormats:
             {"width": 3840, "height": 2160, "fourcc": "420f",
              "fps_ranges": [{"min": 24.0, "max": 24.0}, {"min": 30.0, "max": 30.0}]},
         ]
-        lines = fruitcap.format_device_formats(formats)
+        lines = pjcap.format_device_formats(formats)
         assert len(lines) == 2
         assert "1920x1080" in lines[0]
         assert "420v" in lines[0]
@@ -376,7 +376,7 @@ class TestListFormats:
             {"width": 1920, "height": 1080, "fourcc": "v210",
              "fps_ranges": [{"min": 30.0, "max": 30.0}]},
         ]
-        lines = fruitcap.format_device_formats(formats)
+        lines = pjcap.format_device_formats(formats)
         assert "8-bit 4:2:2 YUV" in lines[0]
         assert "10-bit 4:2:2 YUV" in lines[1]
 
@@ -388,7 +388,7 @@ class TestListFormats:
             {"width": 1920, "height": 1080, "fourcc": "BGRA",
              "fps_ranges": [{"min": 60.0, "max": 60.0}]},
         ]
-        lines = fruitcap.format_device_formats(formats)
+        lines = pjcap.format_device_formats(formats)
         # Both lines should have the FourCC at the same column position
         col0 = lines[0].index("2vuy")
         col1 = lines[1].index("BGRA")
@@ -402,11 +402,11 @@ class TestListFormats:
             {"width": 1920, "height": 1080, "fourcc": "420v",
              "fps_ranges": [{"min": 30.0, "max": 30.0}]},
         ]
-        lines = fruitcap.format_device_formats(formats)
+        lines = pjcap.format_device_formats(formats)
         assert len(lines) == 1
 
     def test_format_device_formats_empty(self):
-        lines = fruitcap.format_device_formats([])
+        lines = pjcap.format_device_formats([])
         assert lines == []
 
     def test_format_device_formats_hex_fourcc(self):
@@ -415,14 +415,14 @@ class TestListFormats:
             {"width": 1920, "height": 1080, "fourcc": "0x00000020",
              "fps_ranges": [{"min": 30.0, "max": 30.0}]},
         ]
-        lines = fruitcap.format_device_formats(formats)
+        lines = pjcap.format_device_formats(formats)
         assert len(lines) == 1
         assert "0x00000020" in lines[0]
 
     def test_fourcc_descriptions_dict(self):
         """FOURCC_DESCRIPTIONS should contain common pixel formats."""
         for code in ("2vuy", "v210", "r210", "BGRA", "420v", "420f"):
-            assert code in fruitcap.FOURCC_DESCRIPTIONS
+            assert code in pjcap.FOURCC_DESCRIPTIONS
 
 
 # ── ProRes and container ──
@@ -437,88 +437,88 @@ class TestProResAndContainer:
 
     def test_prores_codec_accepted(self):
         path = self._write_cfg("[capture]\ncodec = prores\n[audio]\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["codec"] == "prores"
 
     def test_prores_variants(self):
         for variant in ("prores_proxy", "prores_lt", "prores", "prores_hq"):
             path = self._write_cfg(f"[capture]\ncodec = {variant}\n[audio]\n")
-            cfg = fruitcap.load_config(path)
+            cfg = pjcap.load_config(path)
             os.unlink(path)
             assert cfg["codec"] == variant
 
     def test_prores_auto_container_mov(self):
         """ProRes should auto-select MOV container."""
         path = self._write_cfg("[capture]\ncodec = prores\n[audio]\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["container"] == "mov"
 
     def test_h264_auto_container_mp4(self):
         """H.264 should auto-select MP4 container."""
         path = self._write_cfg("[capture]\ncodec = h264\n[audio]\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["container"] == "mp4"
 
     def test_explicit_container_override(self):
         """Explicit container should override auto-selection."""
         path = self._write_cfg("[capture]\ncodec = h265\ncontainer = mov\n[audio]\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["container"] == "mov"
 
     def test_invalid_container_exits(self):
         path = self._write_cfg("[capture]\ncontainer = avi\n[audio]\n")
         with pytest.raises(SystemExit):
-            fruitcap.load_config(path)
+            pjcap.load_config(path)
         os.unlink(path)
 
     def test_invalid_codec_exits(self):
         path = self._write_cfg("[capture]\ncodec = vp9\n[audio]\n")
         with pytest.raises(SystemExit):
-            fruitcap.load_config(path)
+            pjcap.load_config(path)
         os.unlink(path)
 
     def test_container_cli_override(self):
         path = self._write_cfg("[capture]\ncodec = h264\n[audio]\n")
-        cfg = fruitcap.load_config(path, overrides={"container": "mov"})
+        cfg = pjcap.load_config(path, overrides={"container": "mov"})
         os.unlink(path)
         assert cfg["container"] == "mov"
 
     def test_prores_auto_pcm_audio(self):
         """ProRes should auto-select PCM audio when audio codec not explicitly set."""
         path = self._write_cfg("[capture]\ncodec = prores\n[audio]\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["audio_codec"] == "pcm"
 
     def test_prores_audio_override_respected(self):
         """Explicit audio codec override should be respected with ProRes."""
         path = self._write_cfg("[capture]\ncodec = prores\n[audio]\n")
-        cfg = fruitcap.load_config(path, overrides={"audio_codec": "aac"})
+        cfg = pjcap.load_config(path, overrides={"audio_codec": "aac"})
         os.unlink(path)
         assert cfg["audio_codec"] == "aac"
 
     def test_h264_default_aac_audio(self):
         """H.264 should keep AAC audio by default."""
         path = self._write_cfg("[capture]\ncodec = h264\n[audio]\ncodec = aac\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["audio_codec"] == "aac"
 
     def test_pcm_audio_codec_accepted(self):
         """PCM should be a valid audio codec."""
         path = self._write_cfg("[capture]\n[audio]\ncodec = pcm\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["audio_codec"] == "pcm"
 
     def test_prores_forces_10bit_422(self):
         """ProRes should force 10-bit 4:2:2 regardless of config."""
         path = self._write_cfg("[capture]\ncodec = prores\nbit_depth = 8\nchroma = 420\n[audio]\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["bit_depth"] == 10
         assert cfg["chroma"] == "422"
@@ -526,7 +526,7 @@ class TestProResAndContainer:
     def test_prores_hq_forces_10bit_422(self):
         """ProRes HQ should also force 10-bit 4:2:2."""
         path = self._write_cfg("[capture]\ncodec = prores_hq\n[audio]\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["bit_depth"] == 10
         assert cfg["chroma"] == "422"
@@ -534,7 +534,7 @@ class TestProResAndContainer:
     def test_h265_422_forces_10bit(self):
         """HEVC 4:2:2 should force 10-bit (no 8-bit 4:2:2 HEVC profile)."""
         path = self._write_cfg("[capture]\ncodec = h265\nbit_depth = 8\nchroma = 422\n[audio]\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["bit_depth"] == 10
         assert cfg["chroma"] == "422"
@@ -542,7 +542,7 @@ class TestProResAndContainer:
     def test_h265_420_keeps_8bit(self):
         """HEVC 4:2:0 should respect 8-bit config."""
         path = self._write_cfg("[capture]\ncodec = h265\nbit_depth = 8\nchroma = 420\n[audio]\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["bit_depth"] == 8
         assert cfg["chroma"] == "420"
@@ -550,7 +550,7 @@ class TestProResAndContainer:
     def test_h264_keeps_config_bit_depth_chroma(self):
         """H.264 should respect config bit_depth and chroma."""
         path = self._write_cfg("[capture]\ncodec = h264\nbit_depth = 8\nchroma = 420\n[audio]\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["bit_depth"] == 8
         assert cfg["chroma"] == "420"
@@ -560,33 +560,33 @@ class TestProResAndContainer:
 
 class TestQuietMode:
     def test_log_prints_when_not_quiet(self, capsys):
-        old = fruitcap._quiet
+        old = pjcap._quiet
         try:
-            fruitcap._quiet = False
-            fruitcap.log("hello")
+            pjcap._quiet = False
+            pjcap.log("hello")
             assert "hello" in capsys.readouterr().out
         finally:
-            fruitcap._quiet = old
+            pjcap._quiet = old
 
     def test_log_suppressed_when_quiet(self, capsys):
-        old = fruitcap._quiet
+        old = pjcap._quiet
         try:
-            fruitcap._quiet = True
-            fruitcap.log("hello")
+            pjcap._quiet = True
+            pjcap.log("hello")
             assert capsys.readouterr().out == ""
         finally:
-            fruitcap._quiet = old
+            pjcap._quiet = old
 
     def test_errors_still_print_when_quiet(self, capsys):
         """Errors use print(), not log(), so they always appear."""
-        old = fruitcap._quiet
+        old = pjcap._quiet
         try:
-            fruitcap._quiet = True
+            pjcap._quiet = True
             # Simulate an error print (these remain as print())
             print("Error: something went wrong")
             assert "Error" in capsys.readouterr().out
         finally:
-            fruitcap._quiet = old
+            pjcap._quiet = old
 
 
 # ── Color space ──
@@ -601,43 +601,43 @@ class TestColorSpace:
 
     def test_default_bt709(self):
         path = self._write_cfg("[capture]\n[audio]\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["color_space"] == "bt709"
 
     def test_hlg(self):
         path = self._write_cfg("[capture]\ncolor_space = hlg\n[audio]\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["color_space"] == "hlg"
 
     def test_pq(self):
         path = self._write_cfg("[capture]\ncolor_space = pq\n[audio]\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["color_space"] == "pq"
 
     def test_bt2020(self):
         path = self._write_cfg("[capture]\ncolor_space = bt2020\n[audio]\n")
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["color_space"] == "bt2020"
 
     def test_invalid_color_space_exits(self):
         path = self._write_cfg("[capture]\ncolor_space = srgb\n[audio]\n")
         with pytest.raises(SystemExit):
-            fruitcap.load_config(path)
+            pjcap.load_config(path)
         os.unlink(path)
 
     def test_color_space_cli_override(self):
         path = self._write_cfg("[capture]\n[audio]\n")
-        cfg = fruitcap.load_config(path, overrides={"color_space": "hlg"})
+        cfg = pjcap.load_config(path, overrides={"color_space": "hlg"})
         os.unlink(path)
         assert cfg["color_space"] == "hlg"
 
     def test_preset_keys_exist(self):
         """All presets should have the required keys."""
-        for name, preset in fruitcap.COLOR_SPACE_PRESETS.items():
+        for name, preset in pjcap.COLOR_SPACE_PRESETS.items():
             assert "primaries" in preset, f"{name} missing primaries"
             assert "transfer" in preset, f"{name} missing transfer"
             assert "matrix" in preset, f"{name} missing matrix"
@@ -647,48 +647,48 @@ class TestColorSpace:
 
 class TestParseSize:
     def test_plain_bytes(self):
-        assert fruitcap.parse_size("1048576") == 1_048_576
+        assert pjcap.parse_size("1048576") == 1_048_576
 
     def test_kilobytes(self):
-        assert fruitcap.parse_size("100k") == 100 * 1024
+        assert pjcap.parse_size("100k") == 100 * 1024
 
     def test_megabytes(self):
-        assert fruitcap.parse_size("500m") == 500 * 1024**2
+        assert pjcap.parse_size("500m") == 500 * 1024**2
 
     def test_gigabytes(self):
-        assert fruitcap.parse_size("2g") == 2 * 1024**3
+        assert pjcap.parse_size("2g") == 2 * 1024**3
 
     def test_megabytes_suffix_mb(self):
-        assert fruitcap.parse_size("500mb") == 500 * 1024**2
+        assert pjcap.parse_size("500mb") == 500 * 1024**2
 
     def test_gigabytes_suffix_gb(self):
-        assert fruitcap.parse_size("2gb") == 2 * 1024**3
+        assert pjcap.parse_size("2gb") == 2 * 1024**3
 
     def test_fractional(self):
-        assert fruitcap.parse_size("1.5g") == int(1.5 * 1024**3)
+        assert pjcap.parse_size("1.5g") == int(1.5 * 1024**3)
 
     def test_empty_raises(self):
         with pytest.raises(ValueError):
-            fruitcap.parse_size("")
+            pjcap.parse_size("")
 
     def test_invalid_raises(self):
         with pytest.raises(ValueError):
-            fruitcap.parse_size("abc")
+            pjcap.parse_size("abc")
 
 
 class TestSegmentPath:
     def test_segment_path_numbering(self):
-        assert fruitcap.generate_segment_path("/tmp/capture.mp4", 1) == "/tmp/capture_001.mp4"
-        assert fruitcap.generate_segment_path("/tmp/capture.mp4", 2) == "/tmp/capture_002.mp4"
-        assert fruitcap.generate_segment_path("/tmp/capture.mp4", 100) == "/tmp/capture_100.mp4"
+        assert pjcap.generate_segment_path("/tmp/capture.mp4", 1) == "/tmp/capture_001.mp4"
+        assert pjcap.generate_segment_path("/tmp/capture.mp4", 2) == "/tmp/capture_002.mp4"
+        assert pjcap.generate_segment_path("/tmp/capture.mp4", 100) == "/tmp/capture_100.mp4"
 
     def test_segment_path_mov(self):
-        assert fruitcap.generate_segment_path("out.mov", 3) == "out_003.mov"
+        assert pjcap.generate_segment_path("out.mov", 3) == "out_003.mov"
 
     def test_splitting_enabled(self):
         """Recorder correctly reports splitting state."""
         cfg = {"output": "test.mp4"}
-        r = fruitcap.Recorder(cfg)
+        r = pjcap.Recorder(cfg)
         assert not r._splitting_enabled()
         r.split_seconds = 60
         assert r._splitting_enabled()
@@ -698,12 +698,12 @@ class TestSegmentPath:
 
     def test_output_path_for_segment_no_split(self):
         cfg = {"output": "test.mp4"}
-        r = fruitcap.Recorder(cfg)
+        r = pjcap.Recorder(cfg)
         assert r._output_path_for_segment(1) == "test.mp4"
 
     def test_output_path_for_segment_with_split(self):
         cfg = {"output": "test.mp4"}
-        r = fruitcap.Recorder(cfg)
+        r = pjcap.Recorder(cfg)
         r.split_seconds = 60
         assert r._output_path_for_segment(1) == "test_001.mp4"
         assert r._output_path_for_segment(2) == "test_002.mp4"
@@ -730,7 +730,7 @@ class TestSegmentRollover:
             self.session_timestamp = None
 
         def status(self):
-            return fruitcap.AVF.AVAssetWriterStatusWriting
+            return pjcap.AVF.AVAssetWriterStatusWriting
 
         def finishWritingWithCompletionHandler_(self, callback):
             callback()
@@ -762,7 +762,7 @@ class TestSegmentRollover:
             "audio_sample_rate": 48000,
             "audio_channels": 2,
         }
-        recorder = fruitcap.Recorder(cfg)
+        recorder = pjcap.Recorder(cfg)
         recorder.running = True
         recorder.started_writing.set()
         recorder._segment_session_started = True
@@ -791,12 +791,12 @@ class TestSegmentRollover:
 
         with mock.patch.object(recorder, "_finalize_writer_state", side_effect=fake_finalize):
             with mock.patch.object(recorder, "_update_status"):
-                with mock.patch("fruitcap.CoreMedia.CMSampleBufferDataIsReady", return_value=True):
+                with mock.patch("pjcap.CoreMedia.CMSampleBufferDataIsReady", return_value=True):
                     with mock.patch(
-                        "fruitcap.CoreMedia.CMSampleBufferGetPresentationTimeStamp",
+                        "pjcap.CoreMedia.CMSampleBufferGetPresentationTimeStamp",
                         side_effect=["split-ts", "segment-ts"],
                     ):
-                        with mock.patch("fruitcap.os.path.getsize", return_value=1):
+                        with mock.patch("pjcap.os.path.getsize", return_value=1):
                             recorder.handle_video_sample_buffer(object())
 
                             assert finalization_started.wait(0.2)
@@ -862,7 +862,7 @@ class TestWriterFailureHandling:
     class FakeWriter:
         def __init__(self, start_result=True, status=None, error_message="writer error"):
             self.start_result = start_result
-            self._status = status if status is not None else fruitcap.AVF.AVAssetWriterStatusWriting
+            self._status = status if status is not None else pjcap.AVF.AVAssetWriterStatusWriting
             self.error_message = error_message
             self.session_timestamp = None
             self.start_calls = 0
@@ -870,9 +870,9 @@ class TestWriterFailureHandling:
         def startWriting(self):
             self.start_calls += 1
             if self.start_result:
-                self._status = fruitcap.AVF.AVAssetWriterStatusWriting
+                self._status = pjcap.AVF.AVAssetWriterStatusWriting
             else:
-                self._status = fruitcap.AVF.AVAssetWriterStatusFailed
+                self._status = pjcap.AVF.AVAssetWriterStatusFailed
             return self.start_result
 
         def status(self):
@@ -909,7 +909,7 @@ class TestWriterFailureHandling:
         }
 
     def test_start_exits_when_writer_fails_to_start(self, capsys):
-        recorder = fruitcap.Recorder(self._cfg())
+        recorder = pjcap.Recorder(self._cfg())
         recorder.writer = self.FakeWriter(start_result=False, error_message="bad writer settings")
         recorder.session = self.FakeSession()
 
@@ -921,15 +921,15 @@ class TestWriterFailureHandling:
         assert "bad writer settings" in capsys.readouterr().out
 
     def test_video_append_failure_reports_and_triggers_stop(self, capsys):
-        recorder = fruitcap.Recorder(self._cfg())
+        recorder = pjcap.Recorder(self._cfg())
         recorder.running = True
         recorder.writer = self.FakeWriter(error_message="disk full")
         recorder.writer_input = self.FakeInput(append_result=False)
         recorder._stop_callback = mock.Mock()
 
-        with mock.patch("fruitcap.CoreMedia.CMSampleBufferDataIsReady", return_value=True):
+        with mock.patch("pjcap.CoreMedia.CMSampleBufferDataIsReady", return_value=True):
             with mock.patch(
-                "fruitcap.CoreMedia.CMSampleBufferGetPresentationTimeStamp",
+                "pjcap.CoreMedia.CMSampleBufferGetPresentationTimeStamp",
                 return_value="ts",
             ):
                 with mock.patch.object(recorder, "_update_status") as update_status:
@@ -943,7 +943,7 @@ class TestWriterFailureHandling:
         assert "disk full" in capsys.readouterr().out
 
     def test_split_rollover_stops_if_next_writer_fails_to_start(self, capsys):
-        recorder = fruitcap.Recorder(self._cfg())
+        recorder = pjcap.Recorder(self._cfg())
         recorder.running = True
         recorder.started_writing.set()
         recorder._segment_session_started = True
@@ -966,12 +966,12 @@ class TestWriterFailureHandling:
 
         with mock.patch.object(recorder, "_queue_writer_finalization") as queue_finalization:
             with mock.patch.object(recorder, "_update_status"):
-                with mock.patch("fruitcap.CoreMedia.CMSampleBufferDataIsReady", return_value=True):
+                with mock.patch("pjcap.CoreMedia.CMSampleBufferDataIsReady", return_value=True):
                     with mock.patch(
-                        "fruitcap.CoreMedia.CMSampleBufferGetPresentationTimeStamp",
+                        "pjcap.CoreMedia.CMSampleBufferGetPresentationTimeStamp",
                         return_value="split-ts",
                     ):
-                        with mock.patch("fruitcap.os.path.getsize", return_value=1):
+                        with mock.patch("pjcap.os.path.getsize", return_value=1):
                             recorder.handle_video_sample_buffer(object())
 
         recorder._stop_callback.assert_called_once()
@@ -995,120 +995,120 @@ class TestAudioOnly:
 
     def test_audio_only_flag_in_config(self):
         path = self._write_cfg()
-        cfg = fruitcap.load_config(path, overrides={"audio_only": True})
+        cfg = pjcap.load_config(path, overrides={"audio_only": True})
         os.unlink(path)
         assert cfg["audio_only"] is True
 
     def test_audio_only_default_false(self):
         path = self._write_cfg()
-        cfg = fruitcap.load_config(path)
+        cfg = pjcap.load_config(path)
         os.unlink(path)
         assert cfg["audio_only"] is False
 
     def test_audio_only_with_aac(self):
         path = self._write_cfg("[capture]\n[audio]\ncodec = aac\n")
-        cfg = fruitcap.load_config(path, overrides={"audio_only": True})
+        cfg = pjcap.load_config(path, overrides={"audio_only": True})
         os.unlink(path)
         assert cfg["audio_only"] is True
         assert cfg["audio_codec"] == "aac"
 
     def test_audio_only_with_alac(self):
         path = self._write_cfg("[capture]\n[audio]\ncodec = alac\n")
-        cfg = fruitcap.load_config(path, overrides={"audio_only": True})
+        cfg = pjcap.load_config(path, overrides={"audio_only": True})
         os.unlink(path)
         assert cfg["audio_codec"] == "alac"
 
     def test_audio_only_with_pcm(self):
         path = self._write_cfg("[capture]\n[audio]\ncodec = pcm\n")
-        cfg = fruitcap.load_config(path, overrides={"audio_only": True})
+        cfg = pjcap.load_config(path, overrides={"audio_only": True})
         os.unlink(path)
         assert cfg["audio_codec"] == "pcm"
 
     def test_audio_only_sample_rate_override(self):
         path = self._write_cfg("[capture]\n[audio]\n")
-        cfg = fruitcap.load_config(path, overrides={"audio_only": True, "audio_sample_rate": "96000"})
+        cfg = pjcap.load_config(path, overrides={"audio_only": True, "audio_sample_rate": "96000"})
         os.unlink(path)
         assert cfg["audio_sample_rate"] == 96000
 
     def test_audio_only_channels_override(self):
         path = self._write_cfg("[capture]\n[audio]\n")
-        cfg = fruitcap.load_config(path, overrides={"audio_only": True, "audio_channels": "1"})
+        cfg = pjcap.load_config(path, overrides={"audio_only": True, "audio_channels": "1"})
         os.unlink(path)
         assert cfg["audio_channels"] == 1
 
 
 class TestOutputFileType:
     def test_video_mp4_uses_mpeg4(self):
-        file_type, ext = fruitcap.get_output_file_type_and_extension(
+        file_type, ext = pjcap.get_output_file_type_and_extension(
             {"audio_only": False, "container": "mp4"}
         )
-        assert file_type == fruitcap.AVF.AVFileTypeMPEG4
+        assert file_type == pjcap.AVF.AVFileTypeMPEG4
         assert ext == ".mp4"
 
     def test_video_mov_uses_quicktime(self):
-        file_type, ext = fruitcap.get_output_file_type_and_extension(
+        file_type, ext = pjcap.get_output_file_type_and_extension(
             {"audio_only": False, "container": "mov"}
         )
-        assert file_type == fruitcap.AVF.AVFileTypeQuickTimeMovie
+        assert file_type == pjcap.AVF.AVFileTypeQuickTimeMovie
         assert ext == ".mov"
 
     def test_audio_only_pcm_uses_caf(self):
-        file_type, ext = fruitcap.get_output_file_type_and_extension(
+        file_type, ext = pjcap.get_output_file_type_and_extension(
             {"audio_only": True, "audio_codec": "pcm"}
         )
-        assert file_type == fruitcap.AVF.AVFileTypeCoreAudioFormat
+        assert file_type == pjcap.AVF.AVFileTypeCoreAudioFormat
         assert ext == ".caf"
 
 
 class TestWriterMetadata:
     def test_mp4_uses_itunes_encoding_tool_key(self):
-        metadata = fruitcap.build_writer_metadata(fruitcap.AVF.AVFileTypeMPEG4)
+        metadata = pjcap.build_writer_metadata(pjcap.AVF.AVFileTypeMPEG4)
         assert len(metadata) == 1
-        assert metadata[0].keySpace() == fruitcap.AVF.AVMetadataKeySpaceiTunes
-        assert metadata[0].key() == fruitcap.AVF.AVMetadataiTunesMetadataKeyEncodingTool
-        assert metadata[0].value() == "fruitcap.py"
-        assert metadata[0].dataType() == fruitcap.AVF.kCMMetadataBaseDataType_UTF8
+        assert metadata[0].keySpace() == pjcap.AVF.AVMetadataKeySpaceiTunes
+        assert metadata[0].key() == pjcap.AVF.AVMetadataiTunesMetadataKeyEncodingTool
+        assert metadata[0].value() == "pjcap.py"
+        assert metadata[0].dataType() == pjcap.AVF.kCMMetadataBaseDataType_UTF8
 
     def test_mov_uses_quicktime_software_key(self):
-        metadata = fruitcap.build_writer_metadata(fruitcap.AVF.AVFileTypeQuickTimeMovie)
+        metadata = pjcap.build_writer_metadata(pjcap.AVF.AVFileTypeQuickTimeMovie)
         assert len(metadata) == 1
-        assert metadata[0].keySpace() == fruitcap.AVF.AVMetadataKeySpaceQuickTimeMetadata
-        assert metadata[0].key() == fruitcap.AVF.AVMetadataQuickTimeMetadataKeySoftware
-        assert metadata[0].value() == "fruitcap.py"
-        assert metadata[0].dataType() == fruitcap.AVF.kCMMetadataBaseDataType_UTF8
+        assert metadata[0].keySpace() == pjcap.AVF.AVMetadataKeySpaceQuickTimeMetadata
+        assert metadata[0].key() == pjcap.AVF.AVMetadataQuickTimeMetadataKeySoftware
+        assert metadata[0].value() == "pjcap.py"
+        assert metadata[0].dataType() == pjcap.AVF.kCMMetadataBaseDataType_UTF8
 
     def test_caf_falls_back_to_common_software_identifier(self):
-        metadata = fruitcap.build_writer_metadata(fruitcap.AVF.AVFileTypeCoreAudioFormat)
+        metadata = pjcap.build_writer_metadata(pjcap.AVF.AVFileTypeCoreAudioFormat)
         assert len(metadata) == 1
-        assert metadata[0].identifier() == fruitcap.AVF.AVMetadataCommonIdentifierSoftware
-        assert metadata[0].value() == "fruitcap.py"
+        assert metadata[0].identifier() == pjcap.AVF.AVMetadataCommonIdentifierSoftware
+        assert metadata[0].value() == "pjcap.py"
 
 
 class TestCliHelpers:
     def test_build_overrides_includes_audio_settings(self):
-        parser = fruitcap.build_parser()
+        parser = pjcap.build_parser()
         args = parser.parse_args([
             "--audio-codec", "alac",
             "--audio-bitrate", "320k",
             "--audio-sample-rate", "96000",
             "--audio-channels", "1",
         ])
-        overrides = fruitcap.build_overrides_from_args(args)
+        overrides = pjcap.build_overrides_from_args(args)
         assert overrides["audio_codec"] == "alac"
         assert overrides["audio_bitrate"] == "320k"
         assert overrides["audio_sample_rate"] == 96000
         assert overrides["audio_channels"] == 1
 
     def test_build_overrides_includes_discard_late_frames(self):
-        parser = fruitcap.build_parser()
+        parser = pjcap.build_parser()
         args = parser.parse_args(["--discard-late-frames"])
-        overrides = fruitcap.build_overrides_from_args(args)
+        overrides = pjcap.build_overrides_from_args(args)
         assert overrides["discard_late_frames"] is True
 
     def test_build_overrides_can_disable_discard_late_frames(self):
-        parser = fruitcap.build_parser()
+        parser = pjcap.build_parser()
         args = parser.parse_args(["--no-discard-late-frames"])
-        overrides = fruitcap.build_overrides_from_args(args)
+        overrides = pjcap.build_overrides_from_args(args)
         assert overrides["discard_late_frames"] is False
 
 
@@ -1133,33 +1133,33 @@ class TestApplyRuntimeOptions:
     def test_rejects_zero_frames(self):
         recorder = self.DummyRecorder()
         with pytest.raises(SystemExit):
-            fruitcap.apply_runtime_options(recorder, self._args(frames=0))
+            pjcap.apply_runtime_options(recorder, self._args(frames=0))
 
     def test_rejects_negative_time(self):
         recorder = self.DummyRecorder()
         with pytest.raises(SystemExit):
-            fruitcap.apply_runtime_options(recorder, self._args(time=-1))
+            pjcap.apply_runtime_options(recorder, self._args(time=-1))
 
     def test_rejects_zero_split_every(self):
         recorder = self.DummyRecorder()
         with pytest.raises(SystemExit):
-            fruitcap.apply_runtime_options(recorder, self._args(split_every=0))
+            pjcap.apply_runtime_options(recorder, self._args(split_every=0))
 
     def test_rejects_nonpositive_split_size(self):
         recorder = self.DummyRecorder()
         with pytest.raises(SystemExit):
-            fruitcap.apply_runtime_options(recorder, self._args(split_size="-1"))
+            pjcap.apply_runtime_options(recorder, self._args(split_size="-1"))
 
         with pytest.raises(SystemExit):
-            fruitcap.apply_runtime_options(recorder, self._args(split_size="0"))
+            pjcap.apply_runtime_options(recorder, self._args(split_size="0"))
 
     def test_audio_only_frames_are_validated_but_not_applied(self):
         recorder = self.DummyRecorder()
-        fruitcap.apply_runtime_options(recorder, self._args(frames=12), audio_only=True)
+        pjcap.apply_runtime_options(recorder, self._args(frames=12), audio_only=True)
         assert recorder.max_frames is None
 
         with pytest.raises(SystemExit):
-            fruitcap.apply_runtime_options(recorder, self._args(frames=-1), audio_only=True)
+            pjcap.apply_runtime_options(recorder, self._args(frames=-1), audio_only=True)
 
 
 class TestRunHeadless:
@@ -1180,9 +1180,9 @@ class TestRunHeadless:
         def fake_sleep(_):
             recorder.running = False
 
-        with mock.patch.object(fruitcap.sys, "stdin", fake_stdin):
-            with mock.patch("fruitcap.time.sleep", side_effect=fake_sleep):
-                fruitcap.run_headless(recorder)
+        with mock.patch.object(pjcap.sys, "stdin", fake_stdin):
+            with mock.patch("pjcap.time.sleep", side_effect=fake_sleep):
+                pjcap.run_headless(recorder)
 
         assert recorder.stop_calls == 1
 
@@ -1196,9 +1196,9 @@ class TestRunHeadless:
             recorder.running = False
             return [], [], []
 
-        with mock.patch.object(fruitcap.sys, "stdin", fake_stdin):
-            with mock.patch("fruitcap.select.select", side_effect=fake_select):
-                fruitcap.run_headless(recorder)
+        with mock.patch.object(pjcap.sys, "stdin", fake_stdin):
+            with mock.patch("pjcap.select.select", side_effect=fake_select):
+                pjcap.run_headless(recorder)
 
         assert recorder.stop_calls == 1
 
@@ -1207,7 +1207,7 @@ class TestGuiPreviewRestart:
     """Test that changing capture-affecting settings restarts the preview."""
 
     def test_restart_preview_if_idle_stops_and_restarts(self):
-        gui = load_fruitcap_gui()
+        gui = load_pjcap_gui()
         window = mock.MagicMock()
         window._previewing = True
         window._recording = False
@@ -1218,37 +1218,37 @@ class TestGuiPreviewRestart:
 
         with mock.patch.object(gui, "QTimer") as MockTimer:
             MockTimer.singleShot = fake_singleShot
-            gui.FruitcapGUI._restart_preview_if_idle(window)
+            gui.PjcapGUI._restart_preview_if_idle(window)
 
         window._stop_preview.assert_called_once()
         assert len(timer_callbacks) == 1
         assert timer_callbacks[0] == window._start_preview
 
     def test_restart_preview_skipped_when_recording(self):
-        gui = load_fruitcap_gui()
+        gui = load_pjcap_gui()
         window = mock.MagicMock()
         window._previewing = True
         window._recording = True
 
-        gui.FruitcapGUI._restart_preview_if_idle(window)
+        gui.PjcapGUI._restart_preview_if_idle(window)
 
         window._stop_preview.assert_not_called()
 
     def test_restart_preview_skipped_when_not_previewing(self):
-        gui = load_fruitcap_gui()
+        gui = load_pjcap_gui()
         window = mock.MagicMock()
         window._previewing = False
         window._recording = False
 
-        gui.FruitcapGUI._restart_preview_if_idle(window)
+        gui.PjcapGUI._restart_preview_if_idle(window)
 
         window._stop_preview.assert_not_called()
 
     def test_on_device_changed_calls_restart(self):
-        gui = load_fruitcap_gui()
+        gui = load_pjcap_gui()
         window = mock.MagicMock()
 
-        gui.FruitcapGUI._on_device_changed(window, 0)
+        gui.PjcapGUI._on_device_changed(window, 0)
 
         window._auto_select_audio_device.assert_called_once()
         window._restart_preview_if_idle.assert_called_once()
@@ -1258,12 +1258,12 @@ class TestGuiAutoStop:
     """Test that the GUI exposes stop-after and max-frames options."""
 
     def test_stop_after_fields_exist(self):
-        gui = load_fruitcap_gui()
+        gui = load_pjcap_gui()
         # Verify the class references the expected attributes
-        assert hasattr(gui.FruitcapGUI, "_start_recording")
+        assert hasattr(gui.PjcapGUI, "_start_recording")
 
     def test_start_recording_applies_max_seconds(self):
-        gui = load_fruitcap_gui()
+        gui = load_pjcap_gui()
         window = mock.MagicMock()
         window._session = mock.MagicMock()
         window._previewing = True
@@ -1296,13 +1296,13 @@ class TestGuiAutoStop:
         fake_recorder.max_frames = None
 
         with mock.patch.object(gui, "Recorder", return_value=fake_recorder):
-            gui.FruitcapGUI._start_recording(window)
+            gui.PjcapGUI._start_recording(window)
 
         assert fake_recorder.max_seconds == 30.0
         assert fake_recorder.max_frames is None
 
     def test_start_recording_applies_max_frames(self):
-        gui = load_fruitcap_gui()
+        gui = load_pjcap_gui()
         window = mock.MagicMock()
         window._session = mock.MagicMock()
         window._previewing = True
@@ -1332,13 +1332,13 @@ class TestGuiAutoStop:
         fake_recorder.max_frames = None
 
         with mock.patch.object(gui, "Recorder", return_value=fake_recorder):
-            gui.FruitcapGUI._start_recording(window)
+            gui.PjcapGUI._start_recording(window)
 
         assert fake_recorder.max_seconds is None
         assert fake_recorder.max_frames == 500
 
     def test_start_recording_rejects_invalid_max_seconds(self):
-        gui = load_fruitcap_gui()
+        gui = load_pjcap_gui()
         window = mock.MagicMock()
         window._session = mock.MagicMock()
         window._previewing = True
@@ -1362,14 +1362,14 @@ class TestGuiAutoStop:
         window._max_frames_edit.text.return_value = ""
 
         with mock.patch.object(gui, "Recorder") as MockRecorder:
-            gui.FruitcapGUI._start_recording(window)
+            gui.PjcapGUI._start_recording(window)
 
         msg = window._statusbar.showMessage.call_args[0][0]
         assert "Invalid stop-after" in msg
         assert window._recorder is None
 
     def test_start_recording_rejects_invalid_max_frames(self):
-        gui = load_fruitcap_gui()
+        gui = load_pjcap_gui()
         window = mock.MagicMock()
         window._session = mock.MagicMock()
         window._previewing = True
@@ -1393,7 +1393,7 @@ class TestGuiAutoStop:
         window._max_frames_edit.text.return_value = "abc"
 
         with mock.patch.object(gui, "Recorder") as MockRecorder:
-            gui.FruitcapGUI._start_recording(window)
+            gui.PjcapGUI._start_recording(window)
 
         msg = window._statusbar.showMessage.call_args[0][0]
         assert "Invalid max frames" in msg
@@ -1404,14 +1404,14 @@ class TestGuiSplitFields:
     """Test that the GUI exposes segment splitting and wires it to the Recorder."""
 
     def test_split_fields_exist(self):
-        gui = load_fruitcap_gui()
-        assert hasattr(gui.FruitcapGUI, "_build_ui")
+        gui = load_pjcap_gui()
+        assert hasattr(gui.PjcapGUI, "_build_ui")
         # Verify the widget class has split-related attributes after _build_ui
-        # by checking the class references parse_size from fruitcap
+        # by checking the class references parse_size from pjcap
         assert hasattr(gui, "parse_size")
 
     def test_start_recording_applies_split_seconds(self):
-        gui = load_fruitcap_gui()
+        gui = load_pjcap_gui()
         window = mock.MagicMock()
         window._session = mock.MagicMock()
         window._previewing = True
@@ -1444,13 +1444,13 @@ class TestGuiSplitFields:
         fake_recorder.split_size_bytes = None
 
         with mock.patch.object(gui, "Recorder", return_value=fake_recorder):
-            gui.FruitcapGUI._start_recording(window)
+            gui.PjcapGUI._start_recording(window)
 
         assert fake_recorder.split_seconds == 60.0
         assert fake_recorder.split_size_bytes is None
 
     def test_start_recording_applies_split_size(self):
-        gui = load_fruitcap_gui()
+        gui = load_pjcap_gui()
         window = mock.MagicMock()
         window._session = mock.MagicMock()
         window._previewing = True
@@ -1481,13 +1481,13 @@ class TestGuiSplitFields:
         fake_recorder.split_size_bytes = None
 
         with mock.patch.object(gui, "Recorder", return_value=fake_recorder):
-            gui.FruitcapGUI._start_recording(window)
+            gui.PjcapGUI._start_recording(window)
 
         assert fake_recorder.split_seconds is None
         assert fake_recorder.split_size_bytes == 500 * 1024 * 1024
 
     def test_start_recording_rejects_invalid_split_duration(self):
-        gui = load_fruitcap_gui()
+        gui = load_pjcap_gui()
         window = mock.MagicMock()
         window._session = mock.MagicMock()
         window._previewing = True
@@ -1514,7 +1514,7 @@ class TestGuiSplitFields:
         window._split_size_edit = split_sz_edit
 
         with mock.patch.object(gui, "Recorder") as MockRecorder:
-            gui.FruitcapGUI._start_recording(window)
+            gui.PjcapGUI._start_recording(window)
 
         # Should show error and not proceed to adopt_session
         window._statusbar.showMessage.assert_called()
@@ -1530,7 +1530,7 @@ class TestGuiAudioMeter:
     and verify the class exists with the expected interface."""
 
     def test_meter_widget_has_expected_attrs(self):
-        gui = load_fruitcap_gui()
+        gui = load_pjcap_gui()
         assert hasattr(gui.AudioLevelMeterWidget, "set_levels_db")
         assert hasattr(gui.AudioLevelMeterWidget, "clear")
         assert gui.AudioLevelMeterWidget._MIN_DB == -60.0
@@ -1538,7 +1538,7 @@ class TestGuiAudioMeter:
 
 class TestGuiSignalHandling:
     def test_sigint_requests_window_close(self):
-        gui = load_fruitcap_gui()
+        gui = load_pjcap_gui()
         handlers = {}
         app = mock.Mock()
         app._signal_exit_code = 0
@@ -1589,7 +1589,7 @@ class TestGuiSignalHandling:
         assert app._signal_exit_code == 130
 
     def test_sigint_quits_when_window_is_not_visible(self):
-        gui = load_fruitcap_gui()
+        gui = load_pjcap_gui()
         handlers = {}
         app = mock.Mock()
         app._signal_exit_code = 0
@@ -1649,7 +1649,7 @@ class TestAdoptSession:
         return defaults
 
     def test_adopt_session_sets_session_and_delegate(self):
-        recorder = fruitcap.Recorder(self._make_cfg())
+        recorder = pjcap.Recorder(self._make_cfg())
         fake_session = mock.MagicMock()
         fake_delegate = mock.MagicMock()
 
@@ -1660,13 +1660,13 @@ class TestAdoptSession:
         assert fake_delegate.recorder is recorder
 
     def test_adopt_session_marks_session_not_owned(self):
-        recorder = fruitcap.Recorder(self._make_cfg())
+        recorder = pjcap.Recorder(self._make_cfg())
         recorder.adopt_session(mock.MagicMock(), mock.MagicMock())
 
         assert recorder._session_owned is False
 
     def test_start_skips_startRunning_when_session_not_owned(self):
-        recorder = fruitcap.Recorder(self._make_cfg())
+        recorder = pjcap.Recorder(self._make_cfg())
         fake_session = mock.MagicMock()
         fake_delegate = mock.MagicMock()
         recorder.adopt_session(fake_session, fake_delegate)
@@ -1681,7 +1681,7 @@ class TestAdoptSession:
         assert recorder.running is True
 
     def test_start_calls_startRunning_when_session_owned(self):
-        recorder = fruitcap.Recorder(self._make_cfg())
+        recorder = pjcap.Recorder(self._make_cfg())
         fake_session = mock.MagicMock()
         recorder.session = fake_session
         recorder._session_owned = True
@@ -1694,7 +1694,7 @@ class TestAdoptSession:
         fake_session.startRunning.assert_called_once()
 
     def test_stop_skips_stopRunning_when_session_not_owned(self):
-        recorder = fruitcap.Recorder(self._make_cfg())
+        recorder = pjcap.Recorder(self._make_cfg())
         fake_session = mock.MagicMock()
         fake_delegate = mock.MagicMock()
         recorder.adopt_session(fake_session, fake_delegate)
@@ -1707,7 +1707,7 @@ class TestAdoptSession:
         fake_session.stopRunning.assert_not_called()
 
     def test_stop_disconnects_delegate_when_session_not_owned(self):
-        recorder = fruitcap.Recorder(self._make_cfg())
+        recorder = pjcap.Recorder(self._make_cfg())
         fake_session = mock.MagicMock()
         fake_delegate = mock.MagicMock()
         recorder.adopt_session(fake_session, fake_delegate)
@@ -1721,7 +1721,7 @@ class TestAdoptSession:
         assert fake_delegate.recorder is None
 
     def test_stop_calls_stopRunning_when_session_owned(self):
-        recorder = fruitcap.Recorder(self._make_cfg())
+        recorder = pjcap.Recorder(self._make_cfg())
         fake_session = mock.MagicMock()
         recorder.session = fake_session
         recorder._session_owned = True
@@ -1734,7 +1734,7 @@ class TestAdoptSession:
         fake_session.stopRunning.assert_called_once()
 
     def test_session_owned_true_by_default(self):
-        recorder = fruitcap.Recorder(self._make_cfg())
+        recorder = pjcap.Recorder(self._make_cfg())
         assert recorder._session_owned is True
 
 
@@ -1793,12 +1793,12 @@ class TestMainRuntimeConfiguration:
             "audio_sample_rate": 48000,
             "audio_channels": 2,
         }
-        with mock.patch.object(sys, "argv", ["fruitcap.py", "--split-every", "300", "--split-size", "2g"]):
-            with mock.patch("fruitcap.load_config", return_value=cfg.copy()):
-                with mock.patch("fruitcap.check_camera_permission"):
-                    with mock.patch("fruitcap.Recorder", self.FakeRecorder):
-                        with mock.patch("fruitcap.run_headless"):
-                            fruitcap.main()
+        with mock.patch.object(sys, "argv", ["pjcap.py", "--split-every", "300", "--split-size", "2g"]):
+            with mock.patch("pjcap.load_config", return_value=cfg.copy()):
+                with mock.patch("pjcap.check_camera_permission"):
+                    with mock.patch("pjcap.Recorder", self.FakeRecorder):
+                        with mock.patch("pjcap.run_headless"):
+                            pjcap.main()
 
         recorder = self.FakeRecorder.instances[0]
         assert recorder.setup_writer_split_state == (300.0, 2 * 1024**3)
@@ -1825,13 +1825,13 @@ class TestMainRuntimeConfiguration:
             open(os.path.join(d, "capture_001.mp4"), "w").close()
             open(os.path.join(d, "capture_1_001.mp4"), "w").close()
             with mock.patch.object(
-                sys, "argv", ["fruitcap.py", "--split-every", "300", "--no-overwrite"]
+                sys, "argv", ["pjcap.py", "--split-every", "300", "--no-overwrite"]
             ):
-                with mock.patch("fruitcap.load_config", return_value=cfg.copy()):
-                    with mock.patch("fruitcap.check_camera_permission"):
-                        with mock.patch("fruitcap.Recorder", self.FakeRecorder):
-                            with mock.patch("fruitcap.run_headless"):
-                                fruitcap.main()
+                with mock.patch("pjcap.load_config", return_value=cfg.copy()):
+                    with mock.patch("pjcap.check_camera_permission"):
+                        with mock.patch("pjcap.Recorder", self.FakeRecorder):
+                            with mock.patch("pjcap.run_headless"):
+                                pjcap.main()
 
         recorder = self.FakeRecorder.instances[0]
         assert recorder.setup_writer_output == os.path.join(d, "capture_2.mp4")
@@ -1854,12 +1854,12 @@ class TestMainRuntimeConfiguration:
             "audio_sample_rate": 48000,
             "audio_channels": 2,
         }
-        with mock.patch.object(sys, "argv", ["fruitcap.py", "--audio-only"]):
-            with mock.patch("fruitcap.load_config", return_value=cfg.copy()):
-                with mock.patch("fruitcap.check_microphone_permission", return_value=True):
-                    with mock.patch("fruitcap.Recorder", self.FakeRecorder):
-                        with mock.patch("fruitcap.run_headless"):
-                            fruitcap.main()
+        with mock.patch.object(sys, "argv", ["pjcap.py", "--audio-only"]):
+            with mock.patch("pjcap.load_config", return_value=cfg.copy()):
+                with mock.patch("pjcap.check_microphone_permission", return_value=True):
+                    with mock.patch("pjcap.Recorder", self.FakeRecorder):
+                        with mock.patch("pjcap.run_headless"):
+                            pjcap.main()
 
         recorder = self.FakeRecorder.instances[0]
         assert recorder.setup_writer_output == "capture.caf"
@@ -1882,13 +1882,13 @@ class TestMainRuntimeConfiguration:
             "audio_sample_rate": 48000,
             "audio_channels": 2,
         }
-        with mock.patch.object(sys, "argv", ["fruitcap.py", "--audio-only", "--preview"]):
-            with mock.patch("fruitcap.load_config", return_value=cfg.copy()):
-                with mock.patch("fruitcap.check_microphone_permission", return_value=True):
-                    with mock.patch("fruitcap.Recorder", self.FakeRecorder):
-                        with mock.patch("fruitcap.run_headless") as run_headless:
-                            with mock.patch("fruitcap.run_with_preview") as run_with_preview:
-                                fruitcap.main()
+        with mock.patch.object(sys, "argv", ["pjcap.py", "--audio-only", "--preview"]):
+            with mock.patch("pjcap.load_config", return_value=cfg.copy()):
+                with mock.patch("pjcap.check_microphone_permission", return_value=True):
+                    with mock.patch("pjcap.Recorder", self.FakeRecorder):
+                        with mock.patch("pjcap.run_headless") as run_headless:
+                            with mock.patch("pjcap.run_with_preview") as run_with_preview:
+                                pjcap.main()
 
         assert run_headless.called
         assert not run_with_preview.called

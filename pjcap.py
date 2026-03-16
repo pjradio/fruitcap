@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""fruitcap - macOS video/audio capture using AVFoundation hardware encoder.
+"""pjcap - macOS video/audio capture using AVFoundation hardware encoder.
 
 Author: Phil Jensen <philj@philandamy.org>
 """
@@ -328,13 +328,13 @@ def parse_bitrate(value):
     return int(value)
 
 
-def load_config(path="fruitcap.cfg", overrides=None):
+def load_config(path="pjcap.cfg", overrides=None):
     """Load config from file and apply CLI overrides.
 
     overrides is a dict of config keys to override, e.g.:
         {"codec": "h265", "bitrate": "80m", "output": "out.mp4", "fps": "29.97"}
     """
-    # Disable configparser interpolation so fruitcap's `%d` / `%t`
+    # Disable configparser interpolation so pjcap's `%d` / `%t`
     # output filename tokens are read literally.
     config = configparser.ConfigParser(interpolation=None)
     config.read(path)
@@ -601,7 +601,7 @@ def get_output_file_type_and_extension(cfg):
 def build_writer_metadata(file_type):
     """Return writer metadata items describing the authoring software."""
     item = AVF.AVMutableMetadataItem.alloc().init()
-    item.setValue_("fruitcap.py")
+    item.setValue_("pjcap.py")
     if file_type in (AVF.AVFileTypeMPEG4, AVF.AVFileTypeAppleM4A):
         item.setKeySpace_(AVF.AVMetadataKeySpaceiTunes)
         item.setKey_(AVF.AVMetadataiTunesMetadataKeyEncodingTool)
@@ -870,7 +870,7 @@ class Recorder:
             }
             video_output.setVideoSettings_(video_settings)
 
-            video_queue = dispatch_queue_create(b"fruitcap.videoQueue")
+            video_queue = dispatch_queue_create(b"pjcap.videoQueue")
             video_queue_obj = objc.objc_object(c_void_p=video_queue)
             self._delegate.video_output = video_output
             video_output.setSampleBufferDelegate_queue_(self._delegate, video_queue_obj)
@@ -894,7 +894,7 @@ class Recorder:
                 self.session.addInput_(audio_input)
 
                 audio_output = AVF.AVCaptureAudioDataOutput.alloc().init()
-                audio_queue = dispatch_queue_create(b"fruitcap.audioQueue")
+                audio_queue = dispatch_queue_create(b"pjcap.audioQueue")
                 audio_queue_obj = objc.objc_object(c_void_p=audio_queue)
                 self._delegate.audio_output = audio_output
                 audio_output.setSampleBufferDelegate_queue_(
@@ -1799,7 +1799,7 @@ def run_with_preview(recorder, show_source=True, show_compressed=False):
         window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             rect, style, AppKit.NSBackingStoreBuffered, False
         )
-        window.setTitle_("fruitcap preview")
+        window.setTitle_("pjcap preview")
         window.setAspectRatio_(Foundation.NSMakeSize(16, 9))
 
         content_view = window.contentView()
@@ -1821,7 +1821,7 @@ def run_with_preview(recorder, show_source=True, show_compressed=False):
         window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             rect, style, AppKit.NSBackingStoreBuffered, False
         )
-        window.setTitle_("fruitcap compressed")
+        window.setTitle_("pjcap compressed")
         window.setAspectRatio_(Foundation.NSMakeSize(16, 9))
 
         content_view = window.contentView()
@@ -1907,8 +1907,8 @@ def build_parser():
     )
     # Config file and overrides
     parser.add_argument(
-        "--config", metavar="PATH", default="fruitcap.cfg",
-        help="Path to config file (default: fruitcap.cfg)",
+        "--config", metavar="PATH", default="pjcap.cfg",
+        help="Path to config file (default: pjcap.cfg)",
     )
     parser.add_argument(
         "--codec",
@@ -2052,7 +2052,7 @@ def apply_runtime_options(recorder, args, audio_only=False):
 
 def main():
     banner = (
-        "fruitcap.py\n"
+        "pjcap.py\n"
         "Copyright (c) 2026 Phil Jensen <philj@philandamy.org>\n"
         "All rights reserved.\n"
     )

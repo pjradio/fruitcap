@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""fruitcap-gui - macOS video/audio capture GUI using AVFoundation + PyQt5.
+"""pjcap-gui - macOS video/audio capture GUI using AVFoundation + PyQt5.
 
 Author: Phil Jensen <philj@philandamy.org>
 """
@@ -25,8 +25,8 @@ import Foundation
 import Quartz
 import objc
 
-# Import shared infrastructure from fruitcap
-from fruitcap import (
+# Import shared infrastructure from pjcap
+from pjcap import (
     Recorder, SampleBufferDelegate, CompressedPreview,
     load_config, parse_bitrate, parse_size, generate_output_path,
     get_output_file_type_and_extension,
@@ -207,10 +207,10 @@ class StatusSignal(QObject):
     audio_levels = pyqtSignal(object)
 
 
-class FruitcapGUI(QMainWindow):
+class PjcapGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("fruitcap")
+        self.setWindowTitle("pjcap")
         self.setMinimumSize(800, 500)
         self.resize(1000, 800)
 
@@ -621,7 +621,7 @@ class FruitcapGUI(QMainWindow):
 
         video_output = AVF.AVCaptureVideoDataOutput.alloc().init()
         video_output.setAlwaysDiscardsLateVideoFrames_(True)
-        video_queue = dispatch_queue_create(b"fruitcap.videoQueue")
+        video_queue = dispatch_queue_create(b"pjcap.videoQueue")
         video_queue_obj = objc.objc_object(c_void_p=video_queue)
         self._delegate.video_output = video_output
         video_output.setSampleBufferDelegate_queue_(self._delegate, video_queue_obj)
@@ -639,7 +639,7 @@ class FruitcapGUI(QMainWindow):
                 self._session.addInput_(audio_input)
 
                 audio_output = AVF.AVCaptureAudioDataOutput.alloc().init()
-                audio_queue = dispatch_queue_create(b"fruitcap.audioQueue")
+                audio_queue = dispatch_queue_create(b"pjcap.audioQueue")
                 audio_queue_obj = objc.objc_object(c_void_p=audio_queue)
                 self._delegate.audio_output = audio_output
                 audio_output.setSampleBufferDelegate_queue_(self._delegate, audio_queue_obj)
@@ -901,15 +901,15 @@ def install_signal_handlers(app, window):
 
 
 def main():
-    # Suppress fruitcap's quiet-mode print wrapper in GUI context
-    import fruitcap
-    fruitcap._quiet = True
+    # Suppress pjcap's quiet-mode print wrapper in GUI context
+    import pjcap
+    pjcap._quiet = True
 
     app = QApplication(sys.argv)
-    app.setApplicationName("fruitcap")
+    app.setApplicationName("pjcap")
     app._signal_exit_code = 0
 
-    window = FruitcapGUI()
+    window = PjcapGUI()
     window.show()
     app._signal_poll_timer = install_signal_handlers(app, window)
 

@@ -1,4 +1,4 @@
-# fruitcap
+# pjcap
 
 A macOS command-line tool for video and audio capture using AVFoundation with Apple hardware-accelerated H.264/H.265/ProRes encoding.
 
@@ -17,7 +17,7 @@ pip install pyobjc-framework-AVFoundation pyobjc-framework-CoreMedia pyobjc-fram
 ## Usage
 
 ```bash
-python3 fruitcap.py [options]
+python3 pjcap.py [options]
 ```
 
 Press `q` then Enter to stop recording. A live status line shows elapsed time, frames captured, file size, and any dropped frames. By default, output filenames include the current date and time.
@@ -25,26 +25,26 @@ Press `q` then Enter to stop recording. A live status line shows elapsed time, f
 ### Common Examples
 
 ```bash
-# Record with defaults from fruitcap.cfg
-python3 fruitcap.py
+# Record with defaults from pjcap.cfg
+python3 pjcap.py
 
 # Record 10 seconds of ProRes 422 (auto-selects MOV, 10-bit 4:2:2, PCM audio)
-python3 fruitcap.py --codec prores --time 10
+python3 pjcap.py --codec prores --time 10
 
 # Record H.265 at 50 Mbps with preview
-python3 fruitcap.py --codec h265 --bitrate 50m --preview
+python3 pjcap.py --codec h265 --bitrate 50m --preview
 
 # List available capture devices
-python3 fruitcap.py --list-devices
+python3 pjcap.py --list-devices
 
 # List supported formats for a specific device
-python3 fruitcap.py --device "DNxIO" --list-formats
+python3 pjcap.py --device "DNxIO" --list-formats
 
 # Record from a specific device with timestamped output
-python3 fruitcap.py --device 1 -o "capture-%d-%t.mp4"
+python3 pjcap.py --device 1 -o "capture-%d-%t.mp4"
 
 # Record with segment splitting every 5 minutes
-python3 fruitcap.py --split-every 300
+python3 pjcap.py --split-every 300
 ```
 
 ### CLI Options
@@ -83,7 +83,7 @@ python3 fruitcap.py --split-every 300
 
 ## Configuration
 
-Edit `fruitcap.cfg` to set defaults. All settings can be overridden via CLI flags.
+Edit `pjcap.cfg` to set defaults. All settings can be overridden via CLI flags.
 
 ```ini
 [capture]
@@ -124,11 +124,11 @@ channels = 2
 - **sample_rate** — Sample rate in Hz
 - **channels** — Number of audio channels
 
-In `--audio-only` mode, fruitcap defaults to `.m4a` output for AAC/ALAC and `.caf` for PCM.
+In `--audio-only` mode, pjcap defaults to `.m4a` output for AAC/ALAC and `.caf` for PCM.
 
 ### ProRes
 
-ProRes 422 variants are natively 10-bit 4:2:2 codecs. When ProRes is selected, fruitcap automatically:
+ProRes 422 variants are natively 10-bit 4:2:2 codecs. When ProRes is selected, pjcap automatically:
 - Forces 10-bit 4:2:2 pixel format
 - Selects MOV container
 - Defaults audio to 24-bit PCM
@@ -155,5 +155,5 @@ channels = 2
 ## Tests
 
 ```bash
-python3 -m pytest test_fruitcap.py -v
+python3 -m pytest test_pjcap.py -v
 ```

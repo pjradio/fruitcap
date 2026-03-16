@@ -28,7 +28,7 @@ import objc
 # Import shared infrastructure from fruitcap
 from fruitcap import (
     Recorder, SampleBufferDelegate, CompressedPreview,
-    load_config, parse_bitrate, generate_output_path,
+    load_config, parse_bitrate, parse_size, generate_output_path,
     get_output_file_type_and_extension,
     get_devices, list_devices, find_device_by_selector,
     check_camera_permission, check_microphone_permission,
@@ -381,6 +381,14 @@ class FruitcapGUI(QMainWindow):
         self._output_edit = QLineEdit("capture-%d-%t.mp4")
         self._output_edit.setMinimumWidth(200)
         add_row(output_form, "File:", self._output_edit)
+        self._split_duration_edit = QLineEdit()
+        self._split_duration_edit.setMaximumWidth(80)
+        self._split_duration_edit.setPlaceholderText("seconds")
+        add_row(output_form, "Split every:", self._split_duration_edit)
+        self._split_size_edit = QLineEdit()
+        self._split_size_edit.setMaximumWidth(80)
+        self._split_size_edit.setPlaceholderText("e.g. 500m, 2g")
+        add_row(output_form, "Split size:", self._split_size_edit)
         output_group.setLayout(output_form)
         settings_layout.addWidget(output_group)
 
@@ -646,6 +654,31 @@ class FruitcapGUI(QMainWindow):
 
         self._recorder = Recorder(cfg)
 
+        # Apply segment splitting options
+        split_dur = self._split_duration_edit.text().strip()
+        if split_dur:
+            try:
+                split_seconds = float(split_dur)
+                if split_seconds <= 0:
+                    raise ValueError("must be positive")
+                self._recorder.split_seconds = split_seconds
+            except ValueError:
+                self._statusbar.showMessage(f"Invalid split duration: {split_dur!r}")
+                self._recorder = None
+                return
+
+        split_sz = self._split_size_edit.text().strip()
+        if split_sz:
+            try:
+                split_size_bytes = parse_size(split_sz)
+                if split_size_bytes <= 0:
+                    raise ValueError("must be positive")
+                self._recorder.split_size_bytes = split_size_bytes
+            except ValueError:
+                self._statusbar.showMessage(f"Invalid split size: {split_sz!r}")
+                self._recorder = None
+                return
+
         # Adopt the running session — no reconfiguration needed
         self._recorder.adopt_session(self._session, self._delegate)
         self._recorder.setup_writer()
@@ -754,7 +787,7 @@ class FruitcapGUI(QMainWindow):
             self._chroma_combo, self._color_space_combo,
             self._audio_codec_combo, self._audio_bitrate_edit,
             self._audio_sample_rate_combo, self._audio_channels_combo,
-            self._output_edit,
+            self._output_edit, self._split_duration_edit, self._split_size_edit,
         ):
             widget.setEnabled(enabled)
 

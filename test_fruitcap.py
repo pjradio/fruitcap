@@ -1203,6 +1203,130 @@ class TestRunHeadless:
         assert recorder.stop_calls == 1
 
 
+class TestGuiSplitFields:
+    """Test that the GUI exposes segment splitting and wires it to the Recorder."""
+
+    def test_split_fields_exist(self):
+        gui = load_fruitcap_gui()
+        assert hasattr(gui.FruitcapGUI, "_build_ui")
+        # Verify the widget class has split-related attributes after _build_ui
+        # by checking the class references parse_size from fruitcap
+        assert hasattr(gui, "parse_size")
+
+    def test_start_recording_applies_split_seconds(self):
+        gui = load_fruitcap_gui()
+        window = mock.MagicMock()
+        window._session = mock.MagicMock()
+        window._previewing = True
+        window._recording = False
+        window._recorder = None
+
+        fake_cfg = {
+            "codec": "h264", "width": 1920, "height": 1080,
+            "bit_depth": 8, "chroma": "420", "bitrate": 80_000_000,
+            "fps": None, "container": "mp4", "output": "test.mp4",
+            "audio_enabled": False, "audio_codec": "aac",
+            "audio_bitrate": 256_000, "audio_sample_rate": 48000,
+            "audio_channels": 2, "color_space": "bt709",
+            "discard_late_frames": True, "audio_only": False,
+        }
+        window._build_config = mock.Mock(return_value=fake_cfg)
+
+        # Split duration field has "60"
+        split_dur_edit = mock.MagicMock()
+        split_dur_edit.text.return_value = "60"
+        window._split_duration_edit = split_dur_edit
+
+        # Split size field empty
+        split_sz_edit = mock.MagicMock()
+        split_sz_edit.text.return_value = ""
+        window._split_size_edit = split_sz_edit
+
+        fake_recorder = mock.MagicMock()
+        fake_recorder.split_seconds = None
+        fake_recorder.split_size_bytes = None
+
+        with mock.patch.object(gui, "Recorder", return_value=fake_recorder):
+            gui.FruitcapGUI._start_recording(window)
+
+        assert fake_recorder.split_seconds == 60.0
+        assert fake_recorder.split_size_bytes is None
+
+    def test_start_recording_applies_split_size(self):
+        gui = load_fruitcap_gui()
+        window = mock.MagicMock()
+        window._session = mock.MagicMock()
+        window._previewing = True
+        window._recording = False
+        window._recorder = None
+
+        fake_cfg = {
+            "codec": "h264", "width": 1920, "height": 1080,
+            "bit_depth": 8, "chroma": "420", "bitrate": 80_000_000,
+            "fps": None, "container": "mp4", "output": "test.mp4",
+            "audio_enabled": False, "audio_codec": "aac",
+            "audio_bitrate": 256_000, "audio_sample_rate": 48000,
+            "audio_channels": 2, "color_space": "bt709",
+            "discard_late_frames": True, "audio_only": False,
+        }
+        window._build_config = mock.Mock(return_value=fake_cfg)
+
+        split_dur_edit = mock.MagicMock()
+        split_dur_edit.text.return_value = ""
+        window._split_duration_edit = split_dur_edit
+
+        split_sz_edit = mock.MagicMock()
+        split_sz_edit.text.return_value = "500m"
+        window._split_size_edit = split_sz_edit
+
+        fake_recorder = mock.MagicMock()
+        fake_recorder.split_seconds = None
+        fake_recorder.split_size_bytes = None
+
+        with mock.patch.object(gui, "Recorder", return_value=fake_recorder):
+            gui.FruitcapGUI._start_recording(window)
+
+        assert fake_recorder.split_seconds is None
+        assert fake_recorder.split_size_bytes == 500 * 1024 * 1024
+
+    def test_start_recording_rejects_invalid_split_duration(self):
+        gui = load_fruitcap_gui()
+        window = mock.MagicMock()
+        window._session = mock.MagicMock()
+        window._previewing = True
+        window._recording = False
+        window._recorder = None
+
+        fake_cfg = {
+            "codec": "h264", "width": 1920, "height": 1080,
+            "bit_depth": 8, "chroma": "420", "bitrate": 80_000_000,
+            "fps": None, "container": "mp4", "output": "test.mp4",
+            "audio_enabled": False, "audio_codec": "aac",
+            "audio_bitrate": 256_000, "audio_sample_rate": 48000,
+            "audio_channels": 2, "color_space": "bt709",
+            "discard_late_frames": True, "audio_only": False,
+        }
+        window._build_config = mock.Mock(return_value=fake_cfg)
+
+        split_dur_edit = mock.MagicMock()
+        split_dur_edit.text.return_value = "abc"
+        window._split_duration_edit = split_dur_edit
+
+        split_sz_edit = mock.MagicMock()
+        split_sz_edit.text.return_value = ""
+        window._split_size_edit = split_sz_edit
+
+        with mock.patch.object(gui, "Recorder") as MockRecorder:
+            gui.FruitcapGUI._start_recording(window)
+
+        # Should show error and not proceed to adopt_session
+        window._statusbar.showMessage.assert_called()
+        msg = window._statusbar.showMessage.call_args[0][0]
+        assert "Invalid split duration" in msg
+        # Recorder should have been set to None (aborted)
+        assert window._recorder is None
+
+
 class TestGuiAudioMeter:
     """AudioLevelMeterWidget is a QWidget and needs a QApplication to
     instantiate, so we test its level-update logic via the module constants

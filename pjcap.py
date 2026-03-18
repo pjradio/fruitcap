@@ -985,6 +985,7 @@ class Recorder:
         self.max_frames = None
         self.max_seconds = None
         self._stop_callback = None
+        self._stop_requested = threading.Event()
         self._start_timestamp = None
         # Segment splitting
         self.split_seconds = None
@@ -1549,7 +1550,7 @@ class Recorder:
                 )
 
     def handle_video_sample_buffer(self, sample_buffer):
-        if not self.running:
+        if not self.running or self._stop_requested.is_set():
             return
 
         if not CoreMedia.CMSampleBufferDataIsReady(sample_buffer):
@@ -1822,7 +1823,10 @@ class Recorder:
         if self._stop_callback:
             self._stop_callback()
         else:
-            self.stop()
+            # Signal the main thread to call stop() — calling stop() directly
+            # from the delegate queue races with run_headless, which can exit
+            # and terminate the process before finalization completes.
+            self._stop_requested.set()
 
 
 
@@ -2096,7 +2100,7 @@ def run_headless(recorder):
     signal.signal(signal.SIGINT, lambda *_: recorder.stop())
     if sys.stdin.isatty():
         try:
-            while recorder.running:
+            while recorder.running and not recorder._stop_requested.is_set():
                 ready, _, _ = select.select([sys.stdin], [], [], 0.25)
                 if not ready:
                     continue
@@ -2107,7 +2111,7 @@ def run_headless(recorder):
             pass
     else:
         try:
-            while recorder.running:
+            while recorder.running and not recorder._stop_requested.is_set():
                 time.sleep(0.25)
         except KeyboardInterrupt:
             pass

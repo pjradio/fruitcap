@@ -1357,6 +1357,7 @@ class TestRunHeadless:
         def __init__(self):
             self.running = True
             self.stop_calls = 0
+            self._stop_requested = threading.Event()
 
         def stop(self):
             self.stop_calls += 1

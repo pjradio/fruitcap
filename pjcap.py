@@ -284,6 +284,13 @@ RESOLUTION_PRESETS = {
     "720p": (1280, 720),
 }
 
+CAPTURE_PIXEL_FORMATS = {
+    ("420", 8): Quartz.kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+    ("420", 10): Quartz.kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+    ("422", 8): Quartz.kCVPixelFormatType_422YpCbCr8BiPlanarVideoRange,
+    ("422", 10): Quartz.kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange,
+}
+
 # Color space presets: (primaries, transfer function, YCbCr matrix)
 # These keys are AVFoundation constant names resolved at writer setup time.
 COLOR_SPACE_PRESETS = {
@@ -308,6 +315,37 @@ COLOR_SPACE_PRESETS = {
         "matrix": "ITU_R_2020",
     },
 }
+
+
+def get_capture_pixel_format(chroma, bit_depth):
+    """Return the requested CVPixelFormatType for a capture output."""
+    key = (str(chroma), int(bit_depth))
+    try:
+        return CAPTURE_PIXEL_FORMATS[key]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported capture pixel format combination: {chroma!r}/{bit_depth!r}"
+        ) from exc
+
+
+def build_capture_video_output_settings(chroma, bit_depth):
+    """Build AVCaptureVideoDataOutput settings for the requested pixel format."""
+    pixel_format = get_capture_pixel_format(chroma, bit_depth)
+    return {
+        str(Quartz.kCVPixelBufferPixelFormatTypeKey): int(pixel_format),
+    }
+
+
+def make_frame_duration(fps):
+    """Return a CMTime duration matching the requested frame rate."""
+    if fps is None:
+        return None
+    fps = float(fps)
+    if fps <= 0:
+        raise ValueError("fps must be positive")
+    if fps == int(fps):
+        return CoreMedia.CMTimeMake(1, int(fps))
+    return CoreMedia.CMTimeMake(1001, round(fps * 1001))
 
 
 def parse_bitrate(value):
@@ -650,6 +688,178 @@ def get_device_formats(device):
     return formats
 
 
+FRAME_RATE_TOLERANCE = 0.01
+
+
+def _frame_rate_matches(actual_fps, requested_fps, tolerance=FRAME_RATE_TOLERANCE):
+    """Return True when actual_fps is within tolerance of requested_fps."""
+    if actual_fps is None or requested_fps is None:
+        return False
+    window = max(abs(float(requested_fps)), 1.0) * tolerance
+    return abs(float(actual_fps) - float(requested_fps)) <= window
+
+
+def _frame_duration_to_fps(duration):
+    """Convert a CMTime frame duration to frames per second."""
+    if duration is None:
+        return None
+    value = getattr(duration, "value", None)
+    timescale = getattr(duration, "timescale", None)
+    if not value or not timescale:
+        return None
+    return float(timescale) / float(value)
+
+
+def _preferred_frame_duration_for_range(frame_rate_range, fps):
+    """Choose the duration to request for a matching AVFrameRateRange."""
+    if fps is None:
+        return None
+
+    min_fps = frame_rate_range.minFrameRate()
+    max_fps = frame_rate_range.maxFrameRate()
+
+    if _frame_rate_matches(max_fps, fps):
+        return frame_rate_range.minFrameDuration()
+    if _frame_rate_matches(min_fps, fps):
+        return frame_rate_range.maxFrameDuration()
+    return make_frame_duration(fps)
+
+
+def _frame_rate_range_sort_key(frame_rate_range, fps):
+    """Rank frame-rate ranges by how precisely they can satisfy fps."""
+    requested_duration = _preferred_frame_duration_for_range(frame_rate_range, fps)
+    requested_fps = _frame_duration_to_fps(requested_duration)
+    if requested_fps is None:
+        requested_fps = float(fps)
+
+    distance = abs(requested_fps - float(fps))
+    width = abs(frame_rate_range.maxFrameRate() - frame_rate_range.minFrameRate())
+    exact = 1 if _frame_rate_matches(requested_fps, fps) else 0
+    return (
+        exact,
+        -distance,
+        -width,
+        frame_rate_range.maxFrameRate(),
+    )
+
+
+def select_device_format(device, width=None, height=None, fps=None):
+    """Select and activate the best device format matching the requested parameters.
+
+    Finds a format that supports the requested resolution and frame rate,
+    preferring formats with higher max FPS at the target resolution.
+    Sets the device's activeFormat and frame duration if a match is found.
+
+    Returns True if a suitable format was set, False otherwise.
+    """
+    if not width and not height and not fps:
+        return False
+
+    candidates = []
+
+    for fmt in device.formats():
+        desc = fmt.formatDescription()
+        dims = CoreMedia.CMVideoFormatDescriptionGetDimensions(desc)
+
+        # If resolution requested, format must match exactly
+        if width and dims.width != width:
+            continue
+        if height and dims.height != height:
+            continue
+
+        # Check FPS support (use 1% tolerance for NTSC rates like 29.97 ≈ 30)
+        max_fps_supported = 0
+        matched_range = None
+        matched_range_key = None
+        for r in fmt.videoSupportedFrameRateRanges():
+            max_fps_supported = max(max_fps_supported, r.maxFrameRate())
+            if fps is not None:
+                min_rate = r.minFrameRate() * (1.0 - FRAME_RATE_TOLERANCE)
+                max_rate = r.maxFrameRate() * (1.0 + FRAME_RATE_TOLERANCE)
+                if min_rate <= fps <= max_rate:
+                    range_key = _frame_rate_range_sort_key(r, fps)
+                    if matched_range is None or range_key > matched_range_key:
+                        matched_range = r
+                        matched_range_key = range_key
+
+        if fps is not None and matched_range is None:
+            continue
+
+        if fps is None:
+            candidate_key = (max_fps_supported,)
+        else:
+            candidate_key = matched_range_key + (max_fps_supported,)
+        candidates.append((candidate_key, fmt, matched_range))
+
+    if not candidates:
+        return False
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+
+    def apply_candidate(fmt, frame_rate_range):
+        requested_duration = _preferred_frame_duration_for_range(frame_rate_range, fps)
+
+        success, error = device.lockForConfiguration_(None)
+        if not success:
+            return False, None, None, requested_duration, error
+
+        try:
+            device.setActiveFormat_(fmt)
+            if requested_duration is not None:
+                log(
+                    "Setting device format: "
+                    f"{width}x{height}, fps range="
+                    f"{frame_rate_range.minFrameRate():.4f}-{frame_rate_range.maxFrameRate():.4f}, "
+                    f"requested duration={requested_duration.value}/{requested_duration.timescale}"
+                )
+                device.setActiveVideoMinFrameDuration_(requested_duration)
+                device.setActiveVideoMaxFrameDuration_(requested_duration)
+        finally:
+            device.unlockForConfiguration()
+
+        actual_min = device.activeVideoMinFrameDuration()
+        actual_max = device.activeVideoMaxFrameDuration()
+        log(
+            "Device active frame duration: "
+            f"min={actual_min.value}/{actual_min.timescale}, "
+            f"max={actual_max.value}/{actual_max.timescale}"
+        )
+        return True, actual_min, actual_max, requested_duration, None
+
+    best_fmt = candidates[0][1]
+    best_range = candidates[0][2]
+
+    for _candidate_key, fmt, frame_rate_range in candidates:
+        success, actual_min, actual_max, requested_duration, error = apply_candidate(
+            fmt, frame_rate_range
+        )
+        if not success:
+            return False
+
+        if requested_duration is None:
+            return True
+
+        actual_min_fps = _frame_duration_to_fps(actual_min)
+        actual_max_fps = _frame_duration_to_fps(actual_max)
+        if (
+            _frame_rate_matches(actual_min_fps, fps)
+            and _frame_rate_matches(actual_max_fps, fps)
+        ):
+            return True
+
+        log(
+            "Requested frame rate was not accepted for this format: "
+            f"wanted {fps:g} fps, got "
+            f"{actual_min_fps if actual_min_fps is not None else 'unknown'}-"
+            f"{actual_max_fps if actual_max_fps is not None else 'unknown'} fps"
+        )
+
+    # Restore the strongest candidate before falling back to the caller's
+    # frame-duration-only retry path.
+    apply_candidate(best_fmt, best_range)
+    return False
+
+
 FOURCC_DESCRIPTIONS = {
     "2vuy": "8-bit 4:2:2 YUV",
     "yuvs": "8-bit 4:2:2 YUV",
@@ -837,38 +1047,33 @@ class Recorder:
                 print("Error: Could not add device input to session.")
                 sys.exit(1)
 
-            # Set frame rate if configured
-            if self.cfg["fps"]:
-                fps = self.cfg["fps"]
-                # Use integer timescale for clean framerates, high timescale for fractional
-                if fps == int(fps):
-                    duration = CoreMedia.CMTimeMake(1, int(fps))
-                else:
-                    duration = CoreMedia.CMTimeMake(1001, round(fps * 1001))
-                success, error = device.lockForConfiguration_(None)
-                if success:
-                    device.setActiveVideoMinFrameDuration_(duration)
-                    device.setActiveVideoMaxFrameDuration_(duration)
-                    device.unlockForConfiguration()
-                else:
-                    print(f"Warning: Could not set frame rate: {error}")
+            # Select device format matching resolution and frame rate
+            if not select_device_format(
+                device,
+                width=self.cfg["width"],
+                height=self.cfg["height"],
+                fps=self.cfg["fps"],
+            ):
+                # Fall back to setting frame rate only (no format change)
+                if self.cfg["fps"]:
+                    duration = make_frame_duration(self.cfg["fps"])
+                    success, error = device.lockForConfiguration_(None)
+                    if success:
+                        device.setActiveVideoMinFrameDuration_(duration)
+                        device.setActiveVideoMaxFrameDuration_(duration)
+                        device.unlockForConfiguration()
+                    else:
+                        print(f"Warning: Could not set frame rate: {error}")
 
             # Add video data output
             video_output = AVF.AVCaptureVideoDataOutput.alloc().init()
             video_output.setAlwaysDiscardsLateVideoFrames_(self.cfg["discard_late_frames"])
-
-            pixel_formats = {
-                ("420", 8): Quartz.kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-                ("420", 10): Quartz.kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
-                ("422", 8): Quartz.kCVPixelFormatType_422YpCbCr8BiPlanarVideoRange,
-                ("422", 10): Quartz.kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange,
-            }
-            pixel_format = pixel_formats[(self.cfg["chroma"], self.cfg["bit_depth"])]
-
-            video_settings = {
-                str(Quartz.kCVPixelBufferPixelFormatTypeKey): int(pixel_format),
-            }
-            video_output.setVideoSettings_(video_settings)
+            video_output.setVideoSettings_(
+                build_capture_video_output_settings(
+                    self.cfg["chroma"],
+                    self.cfg["bit_depth"],
+                )
+            )
 
             video_queue = dispatch_queue_create(b"pjcap.videoQueue")
             video_queue_obj = objc.objc_object(c_void_p=video_queue)
@@ -960,6 +1165,10 @@ class Recorder:
                     AVF.AVVideoProfileLevelKey: AVF.AVVideoProfileLevelH264HighAutoLevel,
                 }
 
+            if self.cfg["fps"]:
+                compression_settings[AVF.AVVideoExpectedSourceFrameRateKey] = self.cfg["fps"]
+                compression_settings[AVF.AVVideoAverageNonDroppableFrameRateKey] = self.cfg["fps"]
+
             cs = COLOR_SPACE_PRESETS[self.cfg["color_space"]]
             primaries_key = f"AVVideoColorPrimaries_{cs['primaries']}"
             transfer_key = f"AVVideoTransferFunction_{cs['transfer']}"
@@ -1037,6 +1246,16 @@ class Recorder:
                 AVF.AVMediaTypeVideo, video_settings
             )
             writer_input.setExpectsMediaDataInRealTime_(True)
+            # Set media timescale for clean frame rate representation in track header.
+            # Use 600 (standard video timescale, divisible by 24/25/30/60) or
+            # a high-precision timescale for fractional rates like 29.97.
+            if self.cfg["fps"]:
+                fps = self.cfg["fps"]
+                if fps == int(fps):
+                    writer_input.setMediaTimeScale_(int(fps) * 100)
+                else:
+                    # 30000 supports 29.97 (1001 ticks/frame) and 30 (1000 ticks/frame)
+                    writer_input.setMediaTimeScale_(30000)
             if writer.canAddInput_(writer_input):
                 writer.addInput_(writer_input)
             else:

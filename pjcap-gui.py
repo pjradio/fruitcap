@@ -29,11 +29,14 @@ import objc
 from pjcap import (
     Recorder, SampleBufferDelegate, CompressedPreview,
     load_config, parse_bitrate, parse_size, generate_output_path,
+    build_capture_video_output_settings,
+    make_frame_duration,
     get_output_file_type_and_extension,
     get_devices, list_devices, find_device_by_selector,
+    select_device_format,
     check_camera_permission, check_microphone_permission,
     dispatch_queue_create,
-    RESOLUTION_PRESETS, COLOR_SPACE_PRESETS,
+    COLOR_SPACE_PRESETS,
 )
 
 
@@ -318,6 +321,7 @@ class PjcapGUI(QMainWindow):
         self._resolution_combo = QComboBox()
         self._resolution_combo.addItems(["4k", "1080p", "720p"])
         self._resolution_combo.setCurrentText("4k")
+        self._resolution_combo.currentIndexChanged.connect(self._restart_preview_if_idle)
         add_row(video_form, "Resolution:", self._resolution_combo)
 
         self._fps_combo = QComboBox()
@@ -336,11 +340,13 @@ class PjcapGUI(QMainWindow):
 
         self._bit_depth_combo = QComboBox()
         self._bit_depth_combo.addItems(["8", "10"])
+        self._bit_depth_combo.currentIndexChanged.connect(self._restart_preview_if_idle)
         add_row(video_form, "Bit depth:", self._bit_depth_combo)
 
         self._chroma_combo = QComboBox()
         for label, value in [("4:2:0", "420"), ("4:2:2", "422")]:
             self._chroma_combo.addItem(label, value)
+        self._chroma_combo.currentIndexChanged.connect(self._restart_preview_if_idle)
         self._chroma_combo.currentIndexChanged.connect(
             lambda _: self._on_chroma_changed(self._chroma_combo.currentData()))
         add_row(video_form, "Chroma:", self._chroma_combo)
@@ -537,6 +543,19 @@ class PjcapGUI(QMainWindow):
 
     def _build_config(self):
         """Build a config dict from the current UI settings."""
+        cfg = load_config(overrides=self._build_overrides())
+        cfg["output"] = generate_output_path(cfg["output"])
+
+        # Correct output extension
+        base, ext = os.path.splitext(cfg["output"])
+        _, expected_ext = get_output_file_type_and_extension(cfg)
+        if ext.lower() != expected_ext:
+            cfg["output"] = base + expected_ext
+
+        return cfg
+
+    def _build_overrides(self):
+        """Build config overrides from the current UI settings."""
         overrides = {
             "codec": self._codec_combo.currentData(),
             "resolution": self._resolution_combo.currentText(),
@@ -559,16 +578,7 @@ class PjcapGUI(QMainWindow):
         if not self._audio_check.isChecked():
             overrides["audio_enabled"] = False
 
-        cfg = load_config(overrides=overrides)
-        cfg["output"] = generate_output_path(cfg["output"])
-
-        # Correct output extension
-        base, ext = os.path.splitext(cfg["output"])
-        _, expected_ext = get_output_file_type_and_extension(cfg)
-        if ext.lower() != expected_ext:
-            cfg["output"] = base + expected_ext
-
-        return cfg
+        return overrides
 
     def _start_preview(self):
         """Start a capture session with preview and data outputs pre-configured.
@@ -580,6 +590,12 @@ class PjcapGUI(QMainWindow):
         device = self._get_selected_video_device()
         if not device:
             self._statusbar.showMessage("No video device selected")
+            return
+
+        try:
+            cfg = load_config(overrides=self._build_overrides())
+        except (ValueError, SystemExit) as e:
+            self._statusbar.showMessage(f"Config error: {e}")
             return
 
         self._audio_meter.clear()
@@ -597,22 +613,21 @@ class PjcapGUI(QMainWindow):
         if self._session.canAddInput_(dev_input):
             self._session.addInput_(dev_input)
 
-        # Lock device frame rate if a specific FPS is selected
-        fps_text = self._fps_combo.currentText()
-        if fps_text and fps_text != "Device default":
-            try:
-                fps = float(fps_text)
-                if fps == int(fps):
-                    duration = CoreMedia.CMTimeMake(1, int(fps))
-                else:
-                    duration = CoreMedia.CMTimeMake(1001, round(fps * 1001))
-                success, error = device.lockForConfiguration_(None)
-                if success:
-                    device.setActiveVideoMinFrameDuration_(duration)
-                    device.setActiveVideoMaxFrameDuration_(duration)
-                    device.unlockForConfiguration()
-            except (ValueError, AttributeError):
-                pass
+        width = cfg["width"]
+        height = cfg["height"]
+        fps = cfg["fps"]
+        if not select_device_format(device, width=width, height=height, fps=fps):
+            # Fall back to setting frame rate only (no format change)
+            if fps is not None:
+                try:
+                    duration = make_frame_duration(fps)
+                    success, error = device.lockForConfiguration_(None)
+                    if success:
+                        device.setActiveVideoMinFrameDuration_(duration)
+                        device.setActiveVideoMaxFrameDuration_(duration)
+                        device.unlockForConfiguration()
+                except (ValueError, AttributeError):
+                    pass
 
         # Set up delegate and video data output (buffers are discarded
         # until a recorder is attached via delegate.recorder)
@@ -620,7 +635,10 @@ class PjcapGUI(QMainWindow):
         self._delegate.audio_level_callback = lambda levels: self._status_signal.audio_levels.emit(levels)
 
         video_output = AVF.AVCaptureVideoDataOutput.alloc().init()
-        video_output.setAlwaysDiscardsLateVideoFrames_(True)
+        video_output.setAlwaysDiscardsLateVideoFrames_(cfg["discard_late_frames"])
+        video_output.setVideoSettings_(
+            build_capture_video_output_settings(cfg["chroma"], cfg["bit_depth"])
+        )
         video_queue = dispatch_queue_create(b"pjcap.videoQueue")
         video_queue_obj = objc.objc_object(c_void_p=video_queue)
         self._delegate.video_output = video_output

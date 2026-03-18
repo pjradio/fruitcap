@@ -142,6 +142,196 @@ class TestParseBitrate:
         assert cfg["audio_bitrate"] == 256_000
 
 
+class TestCaptureVideoOutputSettings:
+    def test_build_capture_video_output_settings_420_8bit(self):
+        settings = pjcap.build_capture_video_output_settings("420", 8)
+
+        assert settings == {
+            str(pjcap.Quartz.kCVPixelBufferPixelFormatTypeKey): int(
+                pjcap.Quartz.kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            )
+        }
+
+    def test_build_capture_video_output_settings_422_10bit(self):
+        settings = pjcap.build_capture_video_output_settings("422", "10")
+
+        assert settings == {
+            str(pjcap.Quartz.kCVPixelBufferPixelFormatTypeKey): int(
+                pjcap.Quartz.kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
+            )
+        }
+
+    def test_build_capture_video_output_settings_rejects_unknown_format(self):
+        with pytest.raises(ValueError):
+            pjcap.build_capture_video_output_settings("444", 12)
+
+
+class TestFrameDuration:
+    def test_make_frame_duration_integer_rate(self):
+        duration = pjcap.make_frame_duration(30)
+
+        assert duration.value == 1
+        assert duration.timescale == 30
+
+    def test_make_frame_duration_fractional_rate(self):
+        duration = pjcap.make_frame_duration(29.97)
+
+        assert duration.value == 1001
+        assert duration.timescale == 30000
+
+    def test_make_frame_duration_none(self):
+        assert pjcap.make_frame_duration(None) is None
+
+    def test_make_frame_duration_rejects_nonpositive(self):
+        with pytest.raises(ValueError):
+            pjcap.make_frame_duration(0)
+
+
+class TestSelectDeviceFormat:
+    class FakeDimensions:
+        def __init__(self, width, height):
+            self.width = width
+            self.height = height
+
+    class FakeDescription:
+        def __init__(self, width, height):
+            self.dims = TestSelectDeviceFormat.FakeDimensions(width, height)
+
+    class FakeFrameRateRange:
+        def __init__(self, min_fps, max_fps):
+            self._min_fps = min_fps
+            self._max_fps = max_fps
+            self._min_duration = pjcap.make_frame_duration(max_fps)
+            self._max_duration = pjcap.make_frame_duration(min_fps)
+
+        def minFrameRate(self):
+            return self._min_fps
+
+        def maxFrameRate(self):
+            return self._max_fps
+
+        def minFrameDuration(self):
+            return self._min_duration
+
+        def maxFrameDuration(self):
+            return self._max_duration
+
+    class FakeFormat:
+        def __init__(self, name, width, height, ranges):
+            self.name = name
+            self._description = TestSelectDeviceFormat.FakeDescription(width, height)
+            self._ranges = ranges
+
+        def formatDescription(self):
+            return self._description
+
+        def videoSupportedFrameRateRanges(self):
+            return list(self._ranges)
+
+    class FakeDevice:
+        def __init__(self, formats, accepted_fps_by_format=None):
+            self._formats = list(formats)
+            self._accepted_fps_by_format = accepted_fps_by_format or {}
+            self.active_format = None
+            self.requested_durations = []
+            self._active_min_duration = None
+            self._active_max_duration = None
+
+        def formats(self):
+            return list(self._formats)
+
+        def lockForConfiguration_(self, _error):
+            return True, None
+
+        def unlockForConfiguration(self):
+            return None
+
+        def setActiveFormat_(self, fmt):
+            self.active_format = fmt
+
+        def setActiveVideoMinFrameDuration_(self, duration):
+            self.requested_durations.append((self.active_format.name, duration))
+            accepted_fps = self._accepted_fps_by_format.get(
+                self.active_format.name,
+                pjcap._frame_duration_to_fps(duration),
+            )
+            self._active_min_duration = pjcap.make_frame_duration(accepted_fps)
+
+        def setActiveVideoMaxFrameDuration_(self, duration):
+            accepted_fps = self._accepted_fps_by_format.get(
+                self.active_format.name,
+                pjcap._frame_duration_to_fps(duration),
+            )
+            self._active_max_duration = pjcap.make_frame_duration(accepted_fps)
+
+        def activeVideoMinFrameDuration(self):
+            return self._active_min_duration
+
+        def activeVideoMaxFrameDuration(self):
+            return self._active_max_duration
+
+    def test_select_device_format_uses_requested_duration_inside_variable_range(self, monkeypatch):
+        monkeypatch.setattr(
+            pjcap.CoreMedia,
+            "CMVideoFormatDescriptionGetDimensions",
+            lambda desc: desc.dims,
+        )
+
+        fmt = self.FakeFormat(
+            "4k-variable",
+            3840,
+            2160,
+            [self.FakeFrameRateRange(24, 60)],
+        )
+        device = self.FakeDevice([fmt])
+
+        ok = pjcap.select_device_format(device, width=3840, height=2160, fps=30)
+
+        assert ok is True
+        assert device.active_format is fmt
+        requested_duration = device.requested_durations[-1][1]
+        assert requested_duration.value == 1
+        assert requested_duration.timescale == 30
+
+    def test_select_device_format_tries_next_candidate_when_first_clamps_to_wrong_fps(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            pjcap.CoreMedia,
+            "CMVideoFormatDescriptionGetDimensions",
+            lambda desc: desc.dims,
+        )
+
+        first_fmt = self.FakeFormat(
+            "4k-clamped",
+            3840,
+            2160,
+            [self.FakeFrameRateRange(30, 30)],
+        )
+        second_fmt = self.FakeFormat(
+            "4k-good",
+            3840,
+            2160,
+            [self.FakeFrameRateRange(30, 30)],
+        )
+        device = self.FakeDevice(
+            [first_fmt, second_fmt],
+            accepted_fps_by_format={
+                "4k-clamped": 24,
+                "4k-good": 30,
+            },
+        )
+
+        ok = pjcap.select_device_format(device, width=3840, height=2160, fps=30)
+
+        assert ok is True
+        assert device.active_format is second_fmt
+        assert device.activeVideoMinFrameDuration().value == 1
+        assert device.activeVideoMinFrameDuration().timescale == 30
+        assert device.activeVideoMaxFrameDuration().value == 1
+        assert device.activeVideoMaxFrameDuration().timescale == 30
+
+
 # ── CLI config overrides ──
 
 class TestCliOverrides:

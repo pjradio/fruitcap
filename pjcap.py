@@ -1246,16 +1246,6 @@ class Recorder:
                 AVF.AVMediaTypeVideo, video_settings
             )
             writer_input.setExpectsMediaDataInRealTime_(True)
-            # Set media timescale for clean frame rate representation in track header.
-            # Use 600 (standard video timescale, divisible by 24/25/30/60) or
-            # a high-precision timescale for fractional rates like 29.97.
-            if self.cfg["fps"]:
-                fps = self.cfg["fps"]
-                if fps == int(fps):
-                    writer_input.setMediaTimeScale_(int(fps) * 100)
-                else:
-                    # 30000 supports 29.97 (1001 ticks/frame) and 30 (1000 ticks/frame)
-                    writer_input.setMediaTimeScale_(30000)
             if writer.canAddInput_(writer_input):
                 writer.addInput_(writer_input)
             else:

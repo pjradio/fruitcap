@@ -1870,7 +1870,8 @@ class TestAdoptSession:
         fake_session.startRunning.assert_not_called()
         assert recorder.running is True
 
-    def test_start_calls_startRunning_when_session_owned(self):
+    def test_start_does_not_call_startRunning_when_session_owned(self):
+        """startRunning is now called in setup_session, not start()."""
         recorder = pjcap.Recorder(self._make_cfg())
         fake_session = mock.MagicMock()
         recorder.session = fake_session
@@ -1881,7 +1882,7 @@ class TestAdoptSession:
         with mock.patch.object(recorder, "_start_writer", return_value=True):
             recorder.start()
 
-        fake_session.startRunning.assert_called_once()
+        fake_session.startRunning.assert_not_called()
 
     def test_stop_skips_stopRunning_when_session_not_owned(self):
         recorder = pjcap.Recorder(self._make_cfg())

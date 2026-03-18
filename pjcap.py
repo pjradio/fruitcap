@@ -1047,7 +1047,8 @@ class Recorder:
                 print("Error: Could not add device input to session.")
                 sys.exit(1)
 
-            # Select device format matching resolution and frame rate
+            # Select device format and frame rate after adding input but before
+            # adding outputs — matches the GUI's working sequence.
             if not select_device_format(
                 device,
                 width=self.cfg["width"],
@@ -1110,6 +1111,31 @@ class Recorder:
                     self.session.addOutput_(audio_output)
                 else:
                     print("Warning: Could not add audio output to session.")
+
+        # Start the session immediately so the device begins delivering frames
+        # at the configured format/rate before the writer is set up.
+        if self._session_owned:
+            self.session.startRunning()
+
+            # startRunning() can reset the device's active format and frame
+            # duration on some USB/UVC devices (e.g. Logitech Brio).
+            # Re-apply the full format selection after the session starts.
+            if device:
+                if not select_device_format(
+                    device,
+                    width=self.cfg["width"],
+                    height=self.cfg["height"],
+                    fps=self.cfg["fps"],
+                ):
+                    if self.cfg["fps"]:
+                        duration = make_frame_duration(self.cfg["fps"])
+                        success, error = device.lockForConfiguration_(None)
+                        if success:
+                            device.setActiveVideoMinFrameDuration_(duration)
+                            device.setActiveVideoMaxFrameDuration_(duration)
+                            device.unlockForConfiguration()
+                        else:
+                            print(f"Warning: Could not re-apply frame rate: {error}")
 
     def adopt_session(self, session, delegate):
         """Adopt an externally-managed session and delegate for recording.
@@ -1415,8 +1441,6 @@ class Recorder:
             self.running = False
             sys.exit(1)
         self.running = True
-        if self._session_owned:
-            self.session.startRunning()
         if self.cfg["audio_only"]:
             audio_codec_labels = {"alac": "ALAC", "pcm": "PCM", "aac": "AAC"}
             audio_codec = audio_codec_labels.get(self.cfg["audio_codec"], self.cfg["audio_codec"])

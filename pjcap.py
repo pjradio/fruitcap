@@ -1273,6 +1273,12 @@ class Recorder:
                 AVF.AVMediaTypeVideo, video_settings
             )
             writer_input.setExpectsMediaDataInRealTime_(True)
+            # Use 30000 timescale so NTSC rates (29.97, 59.94) can be
+            # represented exactly — 1001/30000 per frame — matching the
+            # timescale used by professional capture hardware.  This also
+            # works cleanly for integer rates: 24→1250, 25→1200, 30→1000,
+            # 60→500 ticks per frame.
+            writer_input.setMediaTimeScale_(30000)
             if writer.canAddInput_(writer_input):
                 writer.addInput_(writer_input)
             else:

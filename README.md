@@ -1,6 +1,6 @@
 # pjcap
 
-A macOS command-line tool for video and audio capture using AVFoundation with Apple hardware-accelerated H.264/H.265/ProRes encoding.
+A macOS video/audio capture toolkit using AVFoundation with Apple hardware-accelerated H.264/H.265/ProRes encoding.
 
 Author: Phil Jensen <philj@philandamy.org>
 
@@ -14,7 +14,25 @@ Author: Phil Jensen <philj@philandamy.org>
 pip install pyobjc-framework-AVFoundation pyobjc-framework-CoreMedia pyobjc-framework-Quartz
 ```
 
-## Usage
+The GUI additionally requires [PyQt5](https://pypi.org/project/PyQt5/):
+
+```bash
+pip install PyQt5
+```
+
+The analysis utilities (`frametimes.py`, `qpdump.py`) require [ffmpeg/ffprobe](https://ffmpeg.org/) on `PATH`. `frametimes.py` optionally uses [mediainfo](https://mediaarea.net/en/MediaInfo) for additional detail.
+
+## Tools
+
+| File | Description |
+|------|-------------|
+| `pjcap.py` | Command-line capture tool |
+| `pjcap-gui.py` | PyQt5 GUI for capture with live preview and audio metering |
+| `frametimes.py` | Frame timing analysis for captured files |
+| `qpdump.py` | Per-frame QP (quantization parameter) dump for H.264/H.265 files |
+| `list_encoders.py` | List all VideoToolbox encoders available on the system |
+
+## pjcap.py — Command-Line Capture
 
 ```bash
 python3 pjcap.py [options]
@@ -45,6 +63,9 @@ python3 pjcap.py --device 1 -o "capture-%d-%t.mp4"
 
 # Record with segment splitting every 5 minutes
 python3 pjcap.py --split-every 300
+
+# Record with VU meter on status line
+python3 pjcap.py --vu
 ```
 
 ### CLI Options
@@ -65,25 +86,46 @@ python3 pjcap.py --split-every 300
 | `--config` | Path to alternate config file |
 | `--device` | Select video device by index or name substring |
 | `--audio-device` | Select audio device by index or name substring |
+| `--audio`, `--no-audio` | Enable or disable audio capture (overrides config) |
 | `--audio-codec` | Audio codec: `aac`, `alac`, `pcm` |
 | `--audio-bitrate` | Audio bitrate for AAC, e.g. `256k` |
 | `--audio-sample-rate` | Audio sample rate in Hz |
 | `--audio-channels` | Audio channel count |
+| `--audio-only` | Record audio only |
 | `--list-devices` | List available video and audio capture devices |
 | `--list-formats` | List supported pixel formats and frame rates for the selected device |
 | `--time` | Stop recording after N seconds (supports fractional) |
 | `--frames` | Stop recording after N frames |
-| `--audio-only` | Record audio only |
 | `--preview` | Show live source preview window |
 | `--preview-compressed` | Show compressed output preview window |
 | `-p`, `--preview-both` | Show both source and compressed preview windows |
+| `--vu` | Show a VU meter on the status line to monitor audio levels |
 | `-q`, `--quiet` | Suppress status output |
 | `--split-every` | Split into segments every N seconds |
 | `--split-size` | Split into segments at size threshold, e.g. `500m`, `2g` |
 
+## pjcap-gui.py — GUI Capture
+
+```bash
+python3 pjcap-gui.py
+```
+
+A PyQt5 GUI that wraps the same capture engine as `pjcap.py`. Features:
+
+- **Live preview** — AVCaptureVideoPreviewLayer embedded in a Qt widget, starts automatically
+- **Audio level metering** — Two-channel dBFS meter with color-coded levels (green/yellow/red)
+- **Device selection** — Video and audio device dropdowns with auto-matching
+- **Full codec/format controls** — Codec, resolution, FPS, bitrate, bit depth, chroma, color space, container
+- **Audio settings** — Codec (AAC/ALAC/PCM), bitrate, sample rate, channels
+- **Recording controls** — Start/stop button, segment splitting, auto-stop by duration or frame count
+- **Seamless preview-to-recording** — Session stays running when recording starts/stops, so the preview is uninterrupted
+- **Keyboard shortcuts** — Esc to stop recording, Q to quit
+
+The GUI imports `Recorder`, `SampleBufferDelegate`, and configuration functions directly from `pjcap.py`.
+
 ## Configuration
 
-Edit `pjcap.cfg` to set defaults. All settings can be overridden via CLI flags.
+Edit `pjcap.cfg` to set defaults. All settings can be overridden via CLI flags (or GUI controls).
 
 ```ini
 [capture]
@@ -151,6 +193,39 @@ codec = alac
 sample_rate = 48000
 channels = 2
 ```
+
+## frametimes.py — Frame Timing Analysis
+
+```bash
+python3 frametimes.py <video-file>
+```
+
+Analyzes frame timing in H.264/H.265 MP4 files using ffprobe (and optionally mediainfo). Reports:
+
+- Container/stream info: codec, profile, resolution, duration, frame count, frame rates, time base
+- mediainfo details: frame rate mode (CFR/VFR), min/max frame rates
+- Per-frame duration statistics: min, avg, max, jitter
+- Duration distribution: histogram showing unique frame durations with fps equivalents and percentages
+
+Useful for verifying constant frame rate, detecting dropped frames, or diagnosing timing issues in captured files.
+
+## qpdump.py — QP Analysis
+
+```bash
+python3 qpdump.py <video-file>
+python3 qpdump.py --detailed <video-file>
+python3 qpdump.py --csv <video-file> > frames.csv
+```
+
+Dumps per-frame QP (quantization parameter) values from H.264/H.265 files using ffmpeg's `trace_headers` bitstream filter. Reports:
+
+- Total frames, file size, average bitrate
+- Overall QP statistics: min, avg, max
+- Per-frame-type breakdown (I/P/B): count, QP range, average frame size
+- `--detailed` — Per-frame table with type, QP, and packet size
+- `--csv` — CSV output with frame number, type, QP, min/max QP, slice count, size, keyframe flag
+
+For frames with multiple slices, the average slice QP is reported.
 
 ## Tests
 

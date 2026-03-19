@@ -206,6 +206,7 @@ class GUISampleBufferDelegate(SampleBufferDelegate):
 
 class StatusSignal(QObject):
     """Bridge to send stop notifications from capture threads to the Qt main thread."""
+    stop_requested = pyqtSignal()
     stopped = pyqtSignal()
     audio_levels = pyqtSignal(object)
 
@@ -223,6 +224,7 @@ class PjcapGUI(QMainWindow):
         self._recording = False
         self._previewing = False
         self._status_signal = StatusSignal()
+        self._status_signal.stop_requested.connect(self._stop_recording)
         self._status_signal.stopped.connect(self._on_recording_stopped)
         self._status_signal.audio_levels.connect(self._on_audio_levels)
 
@@ -758,9 +760,10 @@ class PjcapGUI(QMainWindow):
         self._recorder.adopt_session(self._session, self._delegate)
         self._recorder.setup_writer()
 
-        # Set up stop callback that signals the main thread
+        # Auto-stop can be triggered from the capture delegate thread, so
+        # bounce the actual stop/finalization work to the Qt main thread.
         def on_stop():
-            self._status_signal.stopped.emit()
+            self._status_signal.stop_requested.emit()
         self._recorder._stop_callback = on_stop
 
         self._recorder.start()

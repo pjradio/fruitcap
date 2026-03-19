@@ -63,19 +63,50 @@ def get_duration(path):
 
 
 def parse_trace_output(stderr_text, codec):
-    """Parse ffmpeg trace_headers output into per-frame QP data."""
+    """Parse ffmpeg trace_headers output into per-frame QP data.
+
+    trace_headers outputs: Packet line (size/pts/key), then slice headers
+    for that packet.  We accumulate slice data and flush the completed
+    frame when the next Packet line arrives or at end-of-input.
+    """
     frames = []
     pic_init_qp = 26  # default per spec (pic_init_qp_minus26 = 0)
     current_slice_type = None
     current_slice_qps = []
     current_pkt_size = None
+    current_pts = None
     current_is_key = False
+
+    def _flush():
+        if current_slice_qps and current_pts is not None:
+            avg_qp = sum(current_slice_qps) / len(current_slice_qps)
+            frames.append({
+                "pts": current_pts,
+                "type": current_slice_type or ("I" if current_is_key else "?"),
+                "qp": avg_qp,
+                "qp_min": min(current_slice_qps),
+                "qp_max": max(current_slice_qps),
+                "slices": len(current_slice_qps),
+                "size": current_pkt_size or 0,
+                "key": current_is_key,
+            })
 
     for line in stderr_text.splitlines():
         # PPS: pic_init_qp_minus26 (H.264) or init_qp_minus26 (HEVC)
         m = re.search(r'(?:pic_init|init)_qp_minus26\s+\S+\s+=\s+(-?\d+)', line)
         if m:
             pic_init_qp = 26 + int(m.group(1))
+            continue
+
+        # Packet line — flush previous frame, start new one
+        m = re.search(r'Packet:\s+(\d+)\s+bytes,?\s*(key frame,?)?\s*pts\s+(-?\d+)', line)
+        if m:
+            _flush()
+            current_slice_qps = []
+            current_slice_type = None
+            current_pkt_size = int(m.group(1))
+            current_is_key = m.group(2) is not None
+            current_pts = int(m.group(3))
             continue
 
         # Slice type
@@ -95,28 +126,8 @@ def parse_trace_output(stderr_text, codec):
             current_slice_qps.append(qp)
             continue
 
-        # Packet line marks end of a frame/packet
-        m = re.search(r'Packet:\s+(\d+)\s+bytes,?\s*(key frame,?)?\s*pts\s+(-?\d+)', line)
-        if m:
-            pkt_size = int(m.group(1))
-            is_key = m.group(2) is not None
-            pts = int(m.group(3))
-
-            if current_slice_qps:
-                avg_qp = sum(current_slice_qps) / len(current_slice_qps)
-                frames.append({
-                    "pts": pts,
-                    "type": current_slice_type or ("I" if is_key else "?"),
-                    "qp": avg_qp,
-                    "qp_min": min(current_slice_qps),
-                    "qp_max": max(current_slice_qps),
-                    "slices": len(current_slice_qps),
-                    "size": pkt_size,
-                    "key": is_key,
-                })
-            current_slice_qps = []
-            current_slice_type = None
-            continue
+    # Flush the last frame
+    _flush()
 
     # Sort by PTS for display-order output
     frames.sort(key=lambda f: f["pts"])

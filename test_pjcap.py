@@ -1274,6 +1274,31 @@ class TestWriterMetadata:
         assert metadata[0].value() == "pjcap.py"
 
 
+class TestVideoOutputSettings:
+    def _cfg(self, **overrides):
+        cfg = {
+            "audio_only": False,
+            "audio_enabled": False,
+            "codec": "h264",
+            "width": 1920,
+            "height": 1080,
+            "bit_depth": 8,
+            "chroma": "420",
+            "bitrate": 80_000_000,
+            "fps": None,
+            "color_space": "bt709",
+        }
+        cfg.update(overrides)
+        return cfg
+
+    def test_video_settings_include_square_pixel_aspect_ratio(self):
+        recorder = pjcap.Recorder(self._cfg())
+        video_settings, _ = recorder._get_output_settings()
+        sar = video_settings[pjcap.AVF.AVVideoPixelAspectRatioKey]
+        assert sar[pjcap.AVF.AVVideoPixelAspectRatioHorizontalSpacingKey] == 1
+        assert sar[pjcap.AVF.AVVideoPixelAspectRatioVerticalSpacingKey] == 1
+
+
 class TestCliHelpers:
     def test_build_overrides_includes_audio_settings(self):
         parser = pjcap.build_parser()

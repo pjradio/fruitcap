@@ -1211,6 +1211,10 @@ class Recorder:
                 AVF.AVVideoWidthKey: width,
                 AVF.AVVideoHeightKey: height,
                 AVF.AVVideoColorPropertiesKey: color_properties,
+                AVF.AVVideoPixelAspectRatioKey: {
+                    AVF.AVVideoPixelAspectRatioHorizontalSpacingKey: 1,
+                    AVF.AVVideoPixelAspectRatioVerticalSpacingKey: 1,
+                },
             }
             if compression_settings:
                 video_settings[AVF.AVVideoCompressionPropertiesKey] = compression_settings

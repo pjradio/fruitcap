@@ -1299,6 +1299,113 @@ class TestVideoOutputSettings:
         assert sar[pjcap.AVF.AVVideoPixelAspectRatioVerticalSpacingKey] == 1
 
 
+class TestAudioChannelsConfig:
+    """Test stereo/mono channel configuration through config and output settings."""
+
+    def _write_cfg(self, content="[capture]\n[audio]\n"):
+        f = tempfile.NamedTemporaryFile(mode="w", suffix=".cfg", delete=False)
+        f.write(content)
+        f.flush()
+        f.close()
+        return f.name
+
+    def test_config_default_channels_is_mono(self):
+        """Config file with channels=1 should produce mono."""
+        path = self._write_cfg("[capture]\n[audio]\nchannels = 1\n")
+        cfg = pjcap.load_config(path)
+        os.unlink(path)
+        assert cfg["audio_channels"] == 1
+
+    def test_config_stereo_channels(self):
+        """Config file with channels=2 should produce stereo."""
+        path = self._write_cfg("[capture]\n[audio]\nchannels = 2\n")
+        cfg = pjcap.load_config(path)
+        os.unlink(path)
+        assert cfg["audio_channels"] == 2
+
+    def test_channels_override_to_stereo(self):
+        """CLI override should change mono config to stereo."""
+        path = self._write_cfg("[capture]\n[audio]\nchannels = 1\n")
+        cfg = pjcap.load_config(path, overrides={"audio_channels": "2"})
+        os.unlink(path)
+        assert cfg["audio_channels"] == 2
+
+    def test_aac_output_settings_use_configured_channels(self):
+        """AAC audio output settings should reflect the configured channel count."""
+        for channels in (1, 2):
+            cfg = {
+                "audio_only": False,
+                "audio_enabled": True,
+                "codec": "h264",
+                "width": 1920,
+                "height": 1080,
+                "bit_depth": 8,
+                "chroma": "420",
+                "bitrate": 80_000_000,
+                "fps": None,
+                "color_space": "bt709",
+                "audio_codec": "aac",
+                "audio_bitrate": 256_000,
+                "audio_sample_rate": 48000,
+                "audio_channels": channels,
+            }
+            recorder = pjcap.Recorder(cfg)
+            recorder._delegate = mock.Mock()
+            recorder._delegate.audio_output = mock.Mock()
+            _, audio_settings = recorder._get_output_settings()
+            assert audio_settings[pjcap.AVF.AVNumberOfChannelsKey] == channels
+
+    def test_pcm_output_settings_use_configured_channels(self):
+        """PCM audio output settings should reflect the configured channel count."""
+        for channels in (1, 2):
+            cfg = {
+                "audio_only": False,
+                "audio_enabled": True,
+                "codec": "h264",
+                "width": 1920,
+                "height": 1080,
+                "bit_depth": 8,
+                "chroma": "420",
+                "bitrate": 80_000_000,
+                "fps": None,
+                "color_space": "bt709",
+                "audio_codec": "pcm",
+                "audio_bitrate": 256_000,
+                "audio_sample_rate": 48000,
+                "audio_channels": channels,
+            }
+            recorder = pjcap.Recorder(cfg)
+            recorder._delegate = mock.Mock()
+            recorder._delegate.audio_output = mock.Mock()
+            _, audio_settings = recorder._get_output_settings()
+            assert audio_settings[pjcap.AVF.AVNumberOfChannelsKey] == channels
+
+    def test_alac_output_settings_use_configured_channels(self):
+        """ALAC audio output settings should reflect the configured channel count."""
+        for channels in (1, 2):
+            cfg = {
+                "audio_only": False,
+                "audio_enabled": True,
+                "codec": "h264",
+                "width": 1920,
+                "height": 1080,
+                "bit_depth": 8,
+                "chroma": "420",
+                "bitrate": 80_000_000,
+                "fps": None,
+                "color_space": "bt709",
+                "audio_codec": "alac",
+                "audio_bitrate": 256_000,
+                "audio_sample_rate": 48000,
+                "audio_channels": channels,
+            }
+            recorder = pjcap.Recorder(cfg)
+            recorder._delegate = mock.Mock()
+            recorder._delegate.audio_output = mock.Mock()
+            _, audio_settings = recorder._get_output_settings()
+            assert audio_settings[pjcap.AVF.AVNumberOfChannelsKey] == channels
+
+
 class TestCliHelpers:
     def test_build_overrides_includes_audio_settings(self):
         parser = pjcap.build_parser()
@@ -1468,6 +1575,52 @@ class TestGuiPreviewRestart:
 
         window._auto_select_audio_device.assert_called_once()
         window._restart_preview_if_idle.assert_called_once()
+
+
+class TestGuiStereoCheckbox:
+    """Test that the stereo checkbox produces correct channel config."""
+
+    def test_stereo_unchecked_returns_mono(self):
+        gui = load_pjcap_gui()
+        window = mock.MagicMock()
+        window._stereo_check.isChecked.return_value = False
+        window._audio_check.isChecked.return_value = True
+        window._codec_combo.currentData.return_value = "h264"
+        window._resolution_combo.currentText.return_value = "1080p"
+        window._container_combo.currentData.return_value = "mp4"
+        window._bit_depth_combo.currentText.return_value = "8"
+        window._chroma_combo.currentData.return_value = "420"
+        window._color_space_combo.currentText.return_value = "bt709"
+        window._bitrate_edit.text.return_value = "80m"
+        window._output_edit.text.return_value = "test.mp4"
+        window._audio_codec_combo.currentData.return_value = "aac"
+        window._audio_bitrate_edit.text.return_value = "256k"
+        window._audio_sample_rate_combo.currentText.return_value = "48000"
+        window._fps_combo.currentText.return_value = "Device default"
+
+        overrides = gui.PjcapGUI._build_overrides(window)
+        assert overrides["audio_channels"] == "1"
+
+    def test_stereo_checked_returns_stereo(self):
+        gui = load_pjcap_gui()
+        window = mock.MagicMock()
+        window._stereo_check.isChecked.return_value = True
+        window._audio_check.isChecked.return_value = True
+        window._codec_combo.currentData.return_value = "h264"
+        window._resolution_combo.currentText.return_value = "1080p"
+        window._container_combo.currentData.return_value = "mp4"
+        window._bit_depth_combo.currentText.return_value = "8"
+        window._chroma_combo.currentData.return_value = "420"
+        window._color_space_combo.currentText.return_value = "bt709"
+        window._bitrate_edit.text.return_value = "80m"
+        window._output_edit.text.return_value = "test.mp4"
+        window._audio_codec_combo.currentData.return_value = "aac"
+        window._audio_bitrate_edit.text.return_value = "256k"
+        window._audio_sample_rate_combo.currentText.return_value = "48000"
+        window._fps_combo.currentText.return_value = "Device default"
+
+        overrides = gui.PjcapGUI._build_overrides(window)
+        assert overrides["audio_channels"] == "2"
 
 
 class TestGuiAutoStop:

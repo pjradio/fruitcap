@@ -379,9 +379,8 @@ class PjcapGUI(QMainWindow):
         self._audio_sample_rate_combo.addItems(["48000", "44100", "96000"])
         add_row(audio_form, "Sample rate:", self._audio_sample_rate_combo)
 
-        self._audio_channels_combo = QComboBox()
-        self._audio_channels_combo.addItems(["1", "2"])
-        add_row(audio_form, "Channels:", self._audio_channels_combo)
+        self._stereo_check = QCheckBox("Stereo")
+        add_row(audio_form, "Channels:", self._stereo_check)
 
         audio_group.setLayout(audio_form)
         settings_layout.addWidget(audio_group)
@@ -570,7 +569,7 @@ class PjcapGUI(QMainWindow):
             "audio_codec": self._audio_codec_combo.currentData(),
             "audio_bitrate": self._audio_bitrate_edit.text(),
             "audio_sample_rate": self._audio_sample_rate_combo.currentText(),
-            "audio_channels": self._audio_channels_combo.currentText(),
+            "audio_channels": "2" if self._stereo_check.isChecked() else "1",
         }
 
         fps_text = self._fps_combo.currentText()

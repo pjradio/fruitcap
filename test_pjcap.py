@@ -968,14 +968,15 @@ class TestSegmentRollover:
         next_writer = self.FakeWriter()
         next_video_input = self.FakeInput()
         next_audio_input = self.FakeInput()
+        next_tc_input = self.FakeInput()
         recorder._create_writer = mock.Mock(
-            return_value=(next_writer, next_video_input, next_audio_input)
+            return_value=(next_writer, next_video_input, next_audio_input, next_tc_input)
         )
 
         finalization_started = threading.Event()
         allow_finalization = threading.Event()
 
-        def fake_finalize(writer, writer_input=None, audio_writer_input=None, output_path=None):
+        def fake_finalize(writer, writer_input=None, audio_writer_input=None, tc_writer_input=None, output_path=None):
             finalization_started.set()
             allow_finalization.wait(timeout=1)
 
@@ -1150,8 +1151,9 @@ class TestWriterFailureHandling:
         next_writer = self.FakeWriter(start_result=False, error_message="next segment failed")
         next_video_input = self.FakeInput()
         next_audio_input = self.FakeInput()
+        next_tc_input = self.FakeInput()
         recorder._create_writer = mock.Mock(
-            return_value=(next_writer, next_video_input, next_audio_input)
+            return_value=(next_writer, next_video_input, next_audio_input, next_tc_input)
         )
 
         with mock.patch.object(recorder, "_queue_writer_finalization") as queue_finalization:
@@ -1404,6 +1406,149 @@ class TestAudioChannelsConfig:
             recorder._delegate.audio_output = mock.Mock()
             _, audio_settings = recorder._get_output_settings()
             assert audio_settings[pjcap.AVF.AVNumberOfChannelsKey] == channels
+
+
+class TestTimecode:
+    """Test timecode track creation and helper functions."""
+
+    def test_make_timecode_from_wall_clock_2997(self):
+        """Timecode from wall clock at 29.97fps should have correct frame duration."""
+        frame_dur = pjcap.CoreMedia.CMTimeMake(1001, 30000)
+        tc = pjcap.make_timecode_from_wall_clock(frame_dur)
+        assert tc.frameDuration.value == 1001
+        assert tc.frameDuration.timescale == 30000
+        assert 0 <= tc.hours <= 23
+        assert 0 <= tc.minutes <= 59
+        assert 0 <= tc.seconds <= 59
+        assert 0 <= tc.frames <= 29
+
+    def test_make_timecode_from_wall_clock_24fps(self):
+        """Timecode at 24fps should have frames 0-23."""
+        frame_dur = pjcap.CoreMedia.CMTimeMake(1, 24)
+        tc = pjcap.make_timecode_from_wall_clock(frame_dur)
+        assert tc.frameDuration.value == 1
+        assert tc.frameDuration.timescale == 24
+        assert 0 <= tc.frames <= 23
+
+    def test_make_timecode_from_wall_clock_30fps(self):
+        """Timecode at exact 30fps should have frames 0-29."""
+        frame_dur = pjcap.CoreMedia.CMTimeMake(1, 30)
+        tc = pjcap.make_timecode_from_wall_clock(frame_dur)
+        assert tc.frameDuration.value == 1
+        assert tc.frameDuration.timescale == 30
+        assert 0 <= tc.frames <= 29
+
+    def test_timecode_sample_buffer_created_for_2997(self):
+        """AVCaptureTimecodeCreateMetadataSampleBuffer should succeed for 29.97fps."""
+        frame_dur = pjcap.CoreMedia.CMTimeMake(1001, 30000)
+        tc = pjcap.make_timecode_from_wall_clock(frame_dur)
+        pts = pjcap.CoreMedia.CMTimeMake(0, 30000)
+        sb = pjcap.AVF.AVCaptureTimecodeCreateMetadataSampleBufferAssociatedWithPresentationTimeStamp(
+            tc, pts
+        )
+        assert sb is not None
+
+    def test_timecode_sample_buffer_created_for_24fps(self):
+        """AVCaptureTimecodeCreateMetadataSampleBuffer should succeed for 24fps."""
+        frame_dur = pjcap.CoreMedia.CMTimeMake(1, 24)
+        tc = pjcap.make_timecode_from_wall_clock(frame_dur)
+        pts = pjcap.CoreMedia.CMTimeMake(0, 24)
+        sb = pjcap.AVF.AVCaptureTimecodeCreateMetadataSampleBufferAssociatedWithPresentationTimeStamp(
+            tc, pts
+        )
+        assert sb is not None
+
+    def test_create_writer_mov_returns_tc_input(self):
+        """_create_writer for MOV should return a timecode writer input."""
+        cfg = {
+            "audio_only": False,
+            "audio_enabled": False,
+            "container": "mov",
+            "output": "tc_test.mov",
+            "codec": "h264",
+            "width": 1920,
+            "height": 1080,
+            "bit_depth": 8,
+            "chroma": "420",
+            "bitrate": 80_000_000,
+            "fps": None,
+            "color_space": "bt709",
+            "audio_codec": "aac",
+            "audio_bitrate": 256_000,
+            "audio_sample_rate": 48000,
+            "audio_channels": 1,
+        }
+        recorder = pjcap.Recorder(cfg)
+        with tempfile.NamedTemporaryFile(suffix=".mov", delete=False) as f:
+            path = f.name
+        try:
+            result = recorder._create_writer(path)
+            assert len(result) == 4
+            writer, writer_input, audio_writer_input, tc_writer_input = result
+            assert writer is not None
+            assert writer_input is not None
+            assert audio_writer_input is None  # audio disabled
+            assert tc_writer_input is not None
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_create_writer_mp4_returns_no_tc_input(self):
+        """_create_writer for MP4 should not include a timecode input."""
+        cfg = {
+            "audio_only": False,
+            "audio_enabled": False,
+            "container": "mp4",
+            "output": "tc_test.mp4",
+            "codec": "h264",
+            "width": 1920,
+            "height": 1080,
+            "bit_depth": 8,
+            "chroma": "420",
+            "bitrate": 80_000_000,
+            "fps": None,
+            "color_space": "bt709",
+            "audio_codec": "aac",
+            "audio_bitrate": 256_000,
+            "audio_sample_rate": 48000,
+            "audio_channels": 1,
+        }
+        recorder = pjcap.Recorder(cfg)
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            path = f.name
+        try:
+            result = recorder._create_writer(path)
+            assert len(result) == 4
+            _, _, _, tc_writer_input = result
+            assert tc_writer_input is None
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_write_timecode_sample_skipped_without_tc_input(self):
+        """_write_timecode_sample should be a no-op when tc_writer_input is None."""
+        cfg = {
+            "audio_only": True,
+            "audio_enabled": True,
+            "container": "mp4",
+            "output": "test.mp4",
+            "codec": "h264",
+            "width": 1920,
+            "height": 1080,
+            "bit_depth": 8,
+            "chroma": "420",
+            "bitrate": 80_000_000,
+            "fps": None,
+            "color_space": "bt709",
+            "audio_codec": "aac",
+            "audio_bitrate": 256_000,
+            "audio_sample_rate": 48000,
+            "audio_channels": 1,
+        }
+        recorder = pjcap.Recorder(cfg)
+        recorder.tc_writer_input = None
+        # Should not raise
+        recorder._write_timecode_sample(pjcap.CoreMedia.CMTimeMake(0, 30000))
 
 
 class TestCliHelpers:

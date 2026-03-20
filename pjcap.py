@@ -348,6 +348,25 @@ def make_frame_duration(fps):
     return CoreMedia.CMTimeMake(1001, round(fps * 1001))
 
 
+def make_timecode_from_wall_clock(frame_duration):
+    """Create an AVCaptureTimecode from the current wall-clock time.
+
+    The frame_duration CMTime determines whether the timecode uses
+    drop-frame (e.g. 1001/30000 for 29.97fps) or non-drop numbering.
+    """
+    now = datetime.datetime.now()
+    tc = AVF.AVCaptureTimecode()
+    tc.hours = now.hour
+    tc.minutes = now.minute
+    tc.seconds = now.second
+    # Approximate current frame within the second
+    fps = frame_duration.timescale / frame_duration.value
+    tc.frames = int(now.microsecond / 1_000_000 * fps)
+    tc.frameDuration = frame_duration
+    tc.sourceType = AVF.AVCaptureTimecodeSourceTypeRealTimeClock
+    return tc
+
+
 def parse_bitrate(value):
     """Parse a bitrate string like '80m', '500k', or '150000000' into an integer (bps).
 
@@ -975,6 +994,7 @@ class Recorder:
         self.writer = None
         self.writer_input = None
         self.audio_writer_input = None
+        self.tc_writer_input = None
         self.running = False
         self.frames_written = 0
         self.frames_dropped = 0
@@ -1301,7 +1321,22 @@ class Recorder:
                 print("Warning: Could not add audio writer input.")
                 audio_writer_input = None
 
-        return writer, writer_input, audio_writer_input
+        # Timecode track — only supported in MOV containers (QuickTime extension)
+        tc_writer_input = None
+        if writer_input is not None and file_type == AVF.AVFileTypeQuickTimeMovie:
+            tc_writer_input = AVF.AVAssetWriterInput.assetWriterInputWithMediaType_outputSettings_(
+                AVF.AVMediaTypeTimecode, None
+            )
+            tc_writer_input.setExpectsMediaDataInRealTime_(True)
+            if writer.canAddInput_(tc_writer_input):
+                writer.addInput_(tc_writer_input)
+                writer_input.addTrackAssociationWithTrackOfInput_type_(
+                    tc_writer_input, AVF.AVTrackAssociationTypeTimecode
+                )
+            else:
+                tc_writer_input = None
+
+        return writer, writer_input, audio_writer_input, tc_writer_input
 
     def _writer_error_text(self, writer, fallback_error=None):
         if fallback_error is not None:
@@ -1340,7 +1375,7 @@ class Recorder:
             return False
         return True
 
-    def _finalize_writer_state(self, writer, writer_input=None, audio_writer_input=None, output_path=None):
+    def _finalize_writer_state(self, writer, writer_input=None, audio_writer_input=None, tc_writer_input=None, output_path=None):
         """Finalize a writer/input set synchronously."""
         if not writer:
             return
@@ -1355,13 +1390,15 @@ class Recorder:
                 writer_input.markAsFinished()
             if audio_writer_input:
                 audio_writer_input.markAsFinished()
+            if tc_writer_input:
+                tc_writer_input.markAsFinished()
             done = threading.Event()
             writer.finishWritingWithCompletionHandler_(lambda: done.set())
             if not done.wait(timeout=10):
                 label = f" '{output_path}'" if output_path else ""
                 print(f"\nWarning: Timed out finalizing output file{label}.")
 
-    def _queue_writer_finalization(self, writer, writer_input=None, audio_writer_input=None, output_path=None):
+    def _queue_writer_finalization(self, writer, writer_input=None, audio_writer_input=None, tc_writer_input=None, output_path=None):
         """Finalize a completed segment on a background thread."""
         if writer is None:
             return
@@ -1371,6 +1408,7 @@ class Recorder:
                 writer,
                 writer_input=writer_input,
                 audio_writer_input=audio_writer_input,
+                tc_writer_input=tc_writer_input,
                 output_path=output_path,
             )
 
@@ -1397,6 +1435,27 @@ class Recorder:
             self.start_time = time.monotonic()
             self._start_timestamp = timestamp
             self.started_writing.set()
+        self._write_timecode_sample(timestamp)
+
+    def _write_timecode_sample(self, timestamp):
+        """Write the starting timecode sample to the timecode track."""
+        if not self.tc_writer_input:
+            return
+        try:
+            fps = self.cfg.get("fps")
+            if fps:
+                frame_duration = make_frame_duration(fps)
+            else:
+                # Default to 29.97fps drop-frame for NTSC
+                frame_duration = CoreMedia.CMTimeMake(1001, 30000)
+            tc = make_timecode_from_wall_clock(frame_duration)
+            tc_sample = AVF.AVCaptureTimecodeCreateMetadataSampleBufferAssociatedWithPresentationTimeStamp(
+                tc, timestamp
+            )
+            if tc_sample and self.tc_writer_input.isReadyForMoreMediaData():
+                self.tc_writer_input.appendSampleBuffer_(tc_sample)
+        except Exception:
+            pass  # Timecode is best-effort; don't fail the recording
 
     def _splitting_enabled(self):
         return self.split_seconds is not None or self.split_size_bytes is not None
@@ -1416,15 +1475,17 @@ class Recorder:
             self.writer,
             self.writer_input,
             self.audio_writer_input,
+            self.tc_writer_input,
             old_output_path,
         )
         next_segment_num = self._segment_num + 1
         new_path = self._output_path_for_segment(next_segment_num)
-        new_writer, new_writer_input, new_audio_writer_input = self._create_writer(new_path)
+        new_writer, new_writer_input, new_audio_writer_input, new_tc_writer_input = self._create_writer(new_path)
         if not self._start_writer(new_writer, new_path):
             self.writer = None
             self.writer_input = None
             self.audio_writer_input = None
+            self.tc_writer_input = None
             self._segment_session_started = False
             self._segment_start_timestamp = None
             return old_state, False
@@ -1434,6 +1495,7 @@ class Recorder:
         self.writer = new_writer
         self.writer_input = new_writer_input
         self.audio_writer_input = new_audio_writer_input
+        self.tc_writer_input = new_tc_writer_input
         self._segment_start_timestamp = None
         self._segment_session_started = False
         log(f"  Started segment {self._segment_num}: {new_path}")
@@ -1442,7 +1504,7 @@ class Recorder:
     def setup_writer(self):
         output_path = self._output_path_for_segment(self._segment_num) if self._splitting_enabled() else self.cfg["output"]
         self._segment_paths.append(output_path)
-        self.writer, self.writer_input, self.audio_writer_input = self._create_writer(output_path)
+        self.writer, self.writer_input, self.audio_writer_input, self.tc_writer_input = self._create_writer(output_path)
         self._segment_start_timestamp = None
         self._segment_session_started = False
 
@@ -1526,14 +1588,17 @@ class Recorder:
             writer = self.writer
             writer_input = self.writer_input
             audio_writer_input = self.audio_writer_input
+            tc_writer_input = self.tc_writer_input
             output_path = self._current_output_path()
             self.writer = None
             self.writer_input = None
             self.audio_writer_input = None
+            self.tc_writer_input = None
         self._finalize_writer_state(
             writer,
             writer_input=writer_input,
             audio_writer_input=audio_writer_input,
+            tc_writer_input=tc_writer_input,
             output_path=output_path,
         )
         self._wait_for_pending_finalizations()
@@ -1636,7 +1701,8 @@ class Recorder:
                                     old_state[0],
                                     writer_input=old_state[1],
                                     audio_writer_input=old_state[2],
-                                    output_path=old_state[3],
+                                    tc_writer_input=old_state[3],
+                                    output_path=old_state[4],
                                 )
 
                         if self.max_frames and self.frames_written >= self.max_frames:
@@ -1752,7 +1818,8 @@ class Recorder:
                                     old_state[0],
                                     writer_input=old_state[1],
                                     audio_writer_input=old_state[2],
-                                    output_path=old_state[3],
+                                    tc_writer_input=old_state[3],
+                                    output_path=old_state[4],
                                 )
         if stop_requested:
             self._trigger_stop()

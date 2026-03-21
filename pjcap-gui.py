@@ -280,8 +280,11 @@ class PjcapGUI(QMainWindow):
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._poll_status)
 
-        # Start preview automatically
-        QTimer.singleShot(100, self._start_preview)
+        # Auto-detect AJA device — if present, default to AJA capture mode
+        if self._detect_aja_device():
+            self._aja_check.setChecked(True)  # triggers _on_aja_toggled → AJA preview
+        else:
+            QTimer.singleShot(100, self._start_preview)
 
     def _build_ui(self):
         central = QWidget()
@@ -717,6 +720,24 @@ class PjcapGUI(QMainWindow):
             self._delegate = None
             self._previewing = False
             self._audio_meter.clear()
+
+    def _detect_aja_device(self):
+        """Check if an AJA device is available by running aja-capture --list."""
+        import subprocess
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        aja_bin = os.path.join(script_dir, "build", "aja-capture")
+        if not os.path.isfile(aja_bin):
+            aja_bin = os.path.join(script_dir, "aja-capture")
+        if not os.path.isfile(aja_bin):
+            return False
+        try:
+            result = subprocess.run(
+                [aja_bin, "--list"],
+                capture_output=True, text=True, timeout=3,
+            )
+            return "AJA Devices:" in result.stderr
+        except Exception:
+            return False
 
     def _on_aja_toggled(self, state):
         """Start/stop AJA preview when toggled."""

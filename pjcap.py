@@ -2325,6 +2325,8 @@ def run_aja_capture(cfg, args, aja_device=None, aja_channel=None, aja_input=None
         cmd += ["--input", str(aja_input)]
     if not cfg.get("audio_enabled", True):
         cmd.append("--no-audio")
+    if cfg.get("bit_depth") == "10" or cfg.get("bit_depth") == 10:
+        cmd += ["--pixel-format", "10BitYCbCr"]
 
     log(f"Launching: {' '.join(cmd)}")
     proc = subprocess.Popen(

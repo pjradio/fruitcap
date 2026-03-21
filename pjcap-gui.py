@@ -258,6 +258,11 @@ class PjcapGUI(QMainWindow):
         self._aja_cv_pixfmt = None
         self._aja_preview_running = False
         self._aja_adaptor = None
+        self._aja_rec_frame_num = 0
+        self._aja_audio_sample_offset = 0
+        self._aja_audio_fmt_desc = None
+        self._aja_out_audio_channels = 1
+        self._aja_adaptor = None
         self._status_signal = StatusSignal()
         self._status_signal.stop_requested.connect(self._stop_recording)
         self._status_signal.stopped.connect(self._on_recording_stopped)
@@ -504,8 +509,12 @@ class PjcapGUI(QMainWindow):
     def _restart_preview_if_idle(self, _=None):
         """Restart preview session if previewing but not recording."""
         if self._previewing and not self._recording:
-            self._stop_preview()
-            QTimer.singleShot(100, self._start_preview)
+            if self._aja_check.isChecked():
+                self._stop_aja_preview()
+                QTimer.singleShot(100, self._start_aja_preview)
+            else:
+                self._stop_preview()
+                QTimer.singleShot(100, self._start_preview)
 
     def _auto_select_audio_device(self):
         """Select the audio device whose name best matches the video device."""
@@ -766,6 +775,9 @@ class PjcapGUI(QMainWindow):
             return
 
         cmd = [aja_bin]
+        # Pass pixel format based on bit depth setting
+        if self._bit_depth_combo.currentText() == "10":
+            cmd += ["--pixel-format", "10BitYCbCr"]
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stdin=subprocess.PIPE,
             stderr=None, bufsize=16 * 1024 * 1024,
@@ -817,7 +829,9 @@ class PjcapGUI(QMainWindow):
                 self._aja_proc.kill()
                 self._aja_proc.wait()
             self._aja_proc = None
-        self._aja_thread = None
+        if self._aja_thread is not None:
+            self._aja_thread.join(timeout=3)
+            self._aja_thread = None
         self._aja_display_layer = None
         self._aja_header = None
         self._previewing = False
@@ -989,7 +1003,10 @@ class PjcapGUI(QMainWindow):
         while len(db) < 2:
             db.append(db[0] if db else -60.0)
 
-        self._status_signal.audio_levels.emit({"average_db": db})
+        try:
+            self._status_signal.audio_levels.emit({"average_db": db})
+        except RuntimeError:
+            pass
 
     def _toggle_recording(self):
         if self._recording:
@@ -1291,7 +1308,10 @@ class PjcapGUI(QMainWindow):
         """Clean up on window close."""
         if self._recording and self._recorder:
             self._recorder.stop()
-        self._stop_preview()
+        if self._aja_check.isChecked():
+            self._stop_aja_preview()
+        else:
+            self._stop_preview()
         event.accept()
 
 

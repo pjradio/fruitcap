@@ -37,15 +37,21 @@ from pjcap import (
     check_camera_permission, check_microphone_permission,
     dispatch_queue_create,
     COLOR_SPACE_PRESETS,
+    apply_runtime_options,
+    _AJA_PIXEL_FORMATS,
+    _aja_create_audio_format_desc, _aja_extract_audio_channels,
+    _aja_make_audio_sample_buffer,
+    _read_be32, _readinto_exact,
 )
 
 
 class PreviewWidget(QWidget):
-    """Widget that hosts an AVCaptureVideoPreviewLayer via its native NSView."""
+    """Widget that hosts an AVCaptureVideoPreviewLayer or AVSampleBufferDisplayLayer."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._preview_layer = None
+        self._display_layer = None
         self.setAttribute(Qt.WA_NativeWindow, True)
         self.setFocusPolicy(Qt.ClickFocus)
         self.setMinimumSize(320, 180)
@@ -53,8 +59,7 @@ class PreviewWidget(QWidget):
 
     def attach_session(self, session):
         """Attach an AVCaptureSession to display its preview."""
-        if self._preview_layer:
-            self._preview_layer.removeFromSuperlayer()
+        self._remove_layers()
 
         ns_view = objc.objc_object(c_void_p=int(self.winId()))
         ns_view.setWantsLayer_(True)
@@ -65,11 +70,34 @@ class PreviewWidget(QWidget):
         self._preview_layer.setAutoresizingMask_(2 | 16)  # width + height sizable
         ns_view.layer().addSublayer_(self._preview_layer)
 
+    def attach_display_layer(self):
+        """Create and attach an AVSampleBufferDisplayLayer for raw frame display."""
+        self._remove_layers()
+
+        ns_view = objc.objc_object(c_void_p=int(self.winId()))
+        ns_view.setWantsLayer_(True)
+
+        self._display_layer = AVF.AVSampleBufferDisplayLayer.alloc().init()
+        self._display_layer.setVideoGravity_(AVF.AVLayerVideoGravityResizeAspect)
+        self._display_layer.setFrame_(ns_view.bounds())
+        self._display_layer.setAutoresizingMask_(2 | 16)
+        ns_view.layer().addSublayer_(self._display_layer)
+        return self._display_layer
+
+    def _remove_layers(self):
+        if self._preview_layer:
+            self._preview_layer.removeFromSuperlayer()
+            self._preview_layer = None
+        if self._display_layer:
+            self._display_layer.removeFromSuperlayer()
+            self._display_layer = None
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self._preview_layer:
+        layer = self._preview_layer or self._display_layer
+        if layer:
             ns_view = objc.objc_object(c_void_p=int(self.winId()))
-            self._preview_layer.setFrame_(ns_view.bounds())
+            layer.setFrame_(ns_view.bounds())
 
 
 class AudioLevelMeterWidget(QWidget):
@@ -223,6 +251,13 @@ class PjcapGUI(QMainWindow):
         self._delegate = None
         self._recording = False
         self._previewing = False
+        self._aja_proc = None
+        self._aja_thread = None
+        self._aja_header = None
+        self._aja_display_layer = None
+        self._aja_cv_pixfmt = None
+        self._aja_preview_running = False
+        self._aja_adaptor = None
         self._status_signal = StatusSignal()
         self._status_signal.stop_requested.connect(self._stop_recording)
         self._status_signal.stopped.connect(self._on_recording_stopped)
@@ -302,6 +337,9 @@ class PjcapGUI(QMainWindow):
         self._audio_check.setChecked(True)
         self._audio_check.stateChanged.connect(self._restart_preview_if_idle)
         add_row(device_form, "", self._audio_check)
+        self._aja_check = QCheckBox("AJA capture")
+        self._aja_check.stateChanged.connect(self._on_aja_toggled)
+        add_row(device_form, "", self._aja_check)
         device_group.setLayout(device_form)
         settings_layout.addWidget(device_group)
 
@@ -680,6 +718,250 @@ class PjcapGUI(QMainWindow):
             self._previewing = False
             self._audio_meter.clear()
 
+    def _on_aja_toggled(self, state):
+        """Start/stop AJA preview when toggled."""
+        aja_mode = bool(state)
+        self._video_device_combo.setEnabled(not aja_mode)
+        self._audio_device_combo.setEnabled(not aja_mode)
+        if aja_mode:
+            self._stop_preview()
+            self._start_aja_preview()
+        else:
+            self._stop_aja_preview()
+            if not self._previewing:
+                self._start_preview()
+
+    def _start_aja_preview(self):
+        """Launch aja-capture subprocess and display frames in preview widget."""
+        import json
+        import subprocess
+
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        aja_bin = os.path.join(script_dir, "build", "aja-capture")
+        if not os.path.isfile(aja_bin):
+            aja_bin = os.path.join(script_dir, "aja-capture")
+        if not os.path.isfile(aja_bin):
+            self._statusbar.showMessage("Error: aja-capture binary not found")
+            return
+
+        cmd = [aja_bin]
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stdin=subprocess.PIPE,
+            stderr=None, bufsize=16 * 1024 * 1024,
+        )
+
+        header_line = proc.stdout.readline()
+        if not header_line:
+            self._statusbar.showMessage("AJA: No signal detected")
+            proc.wait()
+            return
+
+        header = json.loads(header_line)
+        self._aja_proc = proc
+        self._aja_header = header
+        self._aja_preview_running = True
+
+        # Attach display layer to preview widget
+        self._aja_display_layer = self._preview_widget.attach_display_layer()
+
+        # Create video format description for display
+        cv_pixfmt = _AJA_PIXEL_FORMATS.get(header["pixel_format"])
+        if cv_pixfmt is None:
+            self._statusbar.showMessage(f"Unsupported pixel format: {header['pixel_format']}")
+            self._stop_aja_preview()
+            return
+
+        self._aja_cv_pixfmt = cv_pixfmt
+        self._previewing = True
+        self._statusbar.showMessage(
+            f"AJA: {header['width']}x{header['height']} "
+            f"{header['fps_num']}/{header['fps_den']}fps")
+
+        # Start preview thread
+        self._aja_thread = threading.Thread(target=self._aja_preview_loop, daemon=True)
+        self._aja_thread.start()
+
+    def _stop_aja_preview(self):
+        """Stop the AJA preview subprocess."""
+        self._aja_preview_running = False
+        if self._aja_proc:
+            try:
+                self._aja_proc.stdin.write(b"stop\n")
+                self._aja_proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
+            try:
+                self._aja_proc.wait(timeout=3)
+            except Exception:
+                self._aja_proc.kill()
+                self._aja_proc.wait()
+            self._aja_proc = None
+        self._aja_thread = None
+        self._aja_display_layer = None
+        self._aja_header = None
+        self._previewing = False
+        self._preview_widget._remove_layers()
+
+    def _aja_preview_loop(self):
+        """Background thread: read frames from aja-capture, display + optionally encode."""
+        proc = self._aja_proc
+        header = self._aja_header
+        pipe = proc.stdout
+        display_layer = self._aja_display_layer
+        cv_pixfmt = self._aja_cv_pixfmt
+
+        width = header["width"]
+        height = header["height"]
+        fps_num = header.get("fps_num", 30000)
+        fps_den = header.get("fps_den", 1001)
+        frame_duration_ticks = int(30000 * fps_den / fps_num) if fps_num else 1001
+
+        # Pre-allocate buffers
+        expected_video_size = width * 2 * height  # UYVY rough estimate
+        video_buf = bytearray(expected_video_size + 4096)
+        audio_buf = bytearray(256 * 1024)
+        src_audio_channels = header.get("audio_channels", 0)
+
+        # Create a pixel buffer to get stride info
+        err0, pb0 = Quartz.CVPixelBufferCreate(None, width, height, cv_pixfmt, None, None)
+        if err0 == 0 and pb0:
+            Quartz.CVPixelBufferLockBaseAddress(pb0, 0)
+            dst_bpr = Quartz.CVPixelBufferGetBytesPerRow(pb0)
+            Quartz.CVPixelBufferUnlockBaseAddress(pb0, 0)
+            # Create format description from this pixel buffer
+            _, vid_fmt_desc = CoreMedia.CMVideoFormatDescriptionCreateForImageBuffer(None, pb0, None)
+            del pb0
+        else:
+            return
+
+        dst_buf_size = dst_bpr * height
+        strides_match = None
+        frame_num = 0
+        first_frame_skipped = False
+
+        while self._aja_preview_running:
+            try:
+                video_size = _read_be32(pipe)
+            except EOFError:
+                break
+
+            if video_size > len(video_buf):
+                video_buf = bytearray(video_size)
+            _readinto_exact(pipe, video_buf, video_size)
+
+            # Read audio (consumed for recording, discarded for preview-only)
+            audio_size = _read_be32(pipe)
+            if audio_size > 0:
+                if audio_size > len(audio_buf):
+                    audio_buf = bytearray(audio_size)
+                _readinto_exact(pipe, audio_buf, audio_size)
+
+            if not first_frame_skipped:
+                first_frame_skipped = True
+                continue
+
+            # Audio metering
+            if audio_size > 0 and src_audio_channels >= 2:
+                self._aja_compute_audio_levels(audio_buf, audio_size, src_audio_channels)
+
+            # Create pixel buffer
+            err, pb = Quartz.CVPixelBufferCreate(None, width, height, cv_pixfmt, None, None)
+            if err != 0 or not pb:
+                continue
+
+            Quartz.CVPixelBufferLockBaseAddress(pb, 0)
+            base = Quartz.CVPixelBufferGetBaseAddress(pb)
+            dst = base.as_buffer(dst_buf_size)
+
+            if strides_match is None:
+                src_bpr = video_size // height if height else dst_bpr
+                strides_match = (src_bpr == dst_bpr)
+
+            if strides_match:
+                copy_len = min(video_size, dst_buf_size)
+                dst[:copy_len] = video_buf[:copy_len]
+            else:
+                src_bpr = video_size // height
+                row_copy = min(src_bpr, dst_bpr)
+                for row in range(height):
+                    src_off = row * src_bpr
+                    dst_off = row * dst_bpr
+                    dst[dst_off:dst_off + row_copy] = video_buf[src_off:src_off + row_copy]
+
+            Quartz.CVPixelBufferUnlockBaseAddress(pb, 0)
+
+            # Display via AVSampleBufferDisplayLayer
+            pts = CoreMedia.CMTimeMake(frame_num * frame_duration_ticks, 30000)
+            dur = CoreMedia.CMTimeMake(frame_duration_ticks, 30000)
+            timing = CoreMedia.CMSampleTimingInfo()
+            timing.duration = dur
+            timing.presentationTimeStamp = pts
+            timing.decodeTimeStamp = CoreMedia.CMTime(value=0, timescale=0, flags=0, epoch=0)
+            _, display_sb = CoreMedia.CMSampleBufferCreateReadyWithImageBuffer(
+                None, pb, vid_fmt_desc, timing, None
+            )
+            if display_sb and display_layer:
+                display_layer.enqueueSampleBuffer_(display_sb)
+
+            # If recording, also feed the pixel buffer adaptor
+            recorder = self._recorder
+            if recorder and recorder.running and hasattr(self, '_aja_adaptor') and self._aja_adaptor:
+                adaptor = self._aja_adaptor
+                rec_pts = CoreMedia.CMTimeMake(
+                    self._aja_rec_frame_num * frame_duration_ticks, 30000)
+                if recorder.writer_input and recorder.writer_input.isReadyForMoreMediaData():
+                    adaptor.appendPixelBuffer_withPresentationTime_(pb, rec_pts)
+                    self._aja_rec_frame_num += 1
+                    recorder.frames_written = self._aja_rec_frame_num
+
+                # Audio
+                if (audio_size > 0 and hasattr(self, '_aja_audio_fmt_desc')
+                        and self._aja_audio_fmt_desc and recorder.audio_writer_input):
+                    src_ch = header.get("audio_channels", 0)
+                    out_ch = self._aja_out_audio_channels
+                    extracted_size = _aja_extract_audio_channels(
+                        audio_buf, audio_size, src_ch, out_ch, self._aja_audio_extract_buf
+                    )
+                    audio_pts = CoreMedia.CMTimeMake(self._aja_audio_sample_offset, 48000)
+                    audio_sb, _ref = _aja_make_audio_sample_buffer(
+                        self._aja_audio_extract_buf, extracted_size,
+                        self._aja_audio_fmt_desc, audio_pts
+                    )
+                    if audio_sb and recorder.audio_writer_input.isReadyForMoreMediaData():
+                        recorder.audio_writer_input.appendSampleBuffer_(audio_sb)
+                    self._aja_audio_sample_offset += extracted_size // (out_ch * 4)
+
+            frame_num += 1
+
+    def _aja_compute_audio_levels(self, audio_buf, audio_size, src_channels):
+        """Compute dBFS from raw 32-bit signed int PCM and update the meter."""
+        import struct, math
+        bytes_per_sample = src_channels * 4
+        num_samples = audio_size // bytes_per_sample
+        if num_samples == 0:
+            return
+
+        # Compute RMS for channels 0 and 1
+        max_val = 2147483647.0  # 2^31 - 1
+        db = []
+        for ch in range(min(2, src_channels)):
+            sum_sq = 0.0
+            for i in range(0, num_samples, 8):  # sample every 8th for speed
+                off = i * bytes_per_sample + ch * 4
+                val = struct.unpack_from('<i', audio_buf, off)[0]
+                normalized = val / max_val
+                sum_sq += normalized * normalized
+            count = (num_samples + 7) // 8
+            rms = math.sqrt(sum_sq / count) if count > 0 else 0.0
+            db_val = 20.0 * math.log10(rms) if rms > 0 else -60.0
+            db.append(max(-60.0, min(0.0, db_val)))
+
+        # Pad to 2 channels if mono
+        while len(db) < 2:
+            db.append(db[0] if db else -60.0)
+
+        self._status_signal.audio_levels.emit({"average_db": db})
+
     def _toggle_recording(self):
         if self._recording:
             self._stop_recording()
@@ -693,6 +975,9 @@ class PjcapGUI(QMainWindow):
         so we just create a writer and point the delegate at the recorder.
         No session reconfiguration means no preview interruption.
         """
+        if self._aja_check.isChecked():
+            return self._start_aja_recording()
+
         if not self._session or not self._previewing:
             self._statusbar.showMessage("No active preview session")
             return
@@ -704,56 +989,8 @@ class PjcapGUI(QMainWindow):
             return
 
         self._recorder = Recorder(cfg)
-
-        # Apply segment splitting options
-        split_dur = self._split_duration_edit.text().strip()
-        if split_dur:
-            try:
-                split_seconds = float(split_dur)
-                if split_seconds <= 0:
-                    raise ValueError("must be positive")
-                self._recorder.split_seconds = split_seconds
-            except ValueError:
-                self._statusbar.showMessage(f"Invalid split duration: {split_dur!r}")
-                self._recorder = None
-                return
-
-        split_sz = self._split_size_edit.text().strip()
-        if split_sz:
-            try:
-                split_size_bytes = parse_size(split_sz)
-                if split_size_bytes <= 0:
-                    raise ValueError("must be positive")
-                self._recorder.split_size_bytes = split_size_bytes
-            except ValueError:
-                self._statusbar.showMessage(f"Invalid split size: {split_sz!r}")
-                self._recorder = None
-                return
-
-        # Apply auto-stop options
-        stop_after = self._stop_after_edit.text().strip()
-        if stop_after:
-            try:
-                max_seconds = float(stop_after)
-                if max_seconds <= 0:
-                    raise ValueError("must be positive")
-                self._recorder.max_seconds = max_seconds
-            except ValueError:
-                self._statusbar.showMessage(f"Invalid stop-after duration: {stop_after!r}")
-                self._recorder = None
-                return
-
-        max_frames = self._max_frames_edit.text().strip()
-        if max_frames:
-            try:
-                n = int(max_frames)
-                if n <= 0:
-                    raise ValueError("must be positive")
-                self._recorder.max_frames = n
-            except ValueError:
-                self._statusbar.showMessage(f"Invalid max frames: {max_frames!r}")
-                self._recorder = None
-                return
+        if not self._apply_recording_options():
+            return
 
         # Adopt the running session — no reconfiguration needed
         self._recorder.adopt_session(self._session, self._delegate)
@@ -775,6 +1012,136 @@ class PjcapGUI(QMainWindow):
         self._statusbar.showMessage(f"Recording to {cfg['output']}...")
         self._status_timer.start(500)
 
+    def _apply_recording_options(self):
+        """Apply split/stop options to self._recorder. Returns False on error."""
+        split_dur = self._split_duration_edit.text().strip()
+        if split_dur:
+            try:
+                split_seconds = float(split_dur)
+                if split_seconds <= 0:
+                    raise ValueError("must be positive")
+                self._recorder.split_seconds = split_seconds
+            except ValueError:
+                self._statusbar.showMessage(f"Invalid split duration: {split_dur!r}")
+                self._recorder = None
+                return False
+
+        split_sz = self._split_size_edit.text().strip()
+        if split_sz:
+            try:
+                split_size_bytes = parse_size(split_sz)
+                if split_size_bytes <= 0:
+                    raise ValueError("must be positive")
+                self._recorder.split_size_bytes = split_size_bytes
+            except ValueError:
+                self._statusbar.showMessage(f"Invalid split size: {split_sz!r}")
+                self._recorder = None
+                return False
+
+        stop_after = self._stop_after_edit.text().strip()
+        if stop_after:
+            try:
+                max_seconds = float(stop_after)
+                if max_seconds <= 0:
+                    raise ValueError("must be positive")
+                self._recorder.max_seconds = max_seconds
+            except ValueError:
+                self._statusbar.showMessage(f"Invalid stop-after duration: {stop_after!r}")
+                self._recorder = None
+                return False
+
+        max_frames = self._max_frames_edit.text().strip()
+        if max_frames:
+            try:
+                n = int(max_frames)
+                if n <= 0:
+                    raise ValueError("must be positive")
+                self._recorder.max_frames = n
+            except ValueError:
+                self._statusbar.showMessage(f"Invalid max frames: {max_frames!r}")
+                self._recorder = None
+                return False
+        return True
+
+    def _start_aja_recording(self):
+        """Start recording from the already-running AJA preview subprocess."""
+        if not self._aja_proc or not self._aja_header:
+            self._statusbar.showMessage("No AJA preview active — check AJA capture first")
+            return
+
+        header = self._aja_header
+        try:
+            cfg = self._build_config()
+        except (ValueError, SystemExit) as e:
+            self._statusbar.showMessage(f"Config error: {e}")
+            return
+
+        # Override cfg with detected signal
+        cfg["width"] = header["width"]
+        cfg["height"] = header["height"]
+        if header["fps_den"] and header["fps_num"]:
+            cfg["fps"] = header["fps_num"] / header["fps_den"]
+        if header["audio_channels"] > 0:
+            cfg["audio_sample_rate"] = header.get("audio_sample_rate", 48000)
+
+        cv_pixfmt = self._aja_cv_pixfmt
+
+        # Create recorder and writer
+        self._recorder = Recorder(cfg)
+        if not self._apply_recording_options():
+            return
+
+        self._recorder.setup_writer()
+
+        # Pixel buffer adaptor — the preview loop will use this
+        pb_attrs = {
+            str(Quartz.kCVPixelBufferPixelFormatTypeKey): int(cv_pixfmt),
+            str(Quartz.kCVPixelBufferWidthKey): header["width"],
+            str(Quartz.kCVPixelBufferHeightKey): header["height"],
+        }
+        self._aja_adaptor = AVF.AVAssetWriterInputPixelBufferAdaptor.alloc()\
+            .initWithAssetWriterInput_sourcePixelBufferAttributes_(
+                self._recorder.writer_input, pb_attrs
+            )
+
+        self._recorder.start()
+
+        if not self._recorder.writer or self._recorder.writer.status() != AVF.AVAssetWriterStatusWriting:
+            self._statusbar.showMessage("Error: AVAssetWriter failed to start")
+            self._recorder = None
+            self._aja_adaptor = None
+            return
+
+        # Start writer session
+        start_pts = CoreMedia.CMTimeMake(0, 30000)
+        self._recorder.writer.startSessionAtSourceTime_(start_pts)
+        self._recorder._segment_session_started = True
+        self._recorder._segment_start_timestamp = start_pts
+        self._recorder.start_time = time.monotonic()
+        self._recorder._start_timestamp = start_pts
+        self._recorder.started_writing.set()
+        self._recorder._write_timecode_sample(start_pts)
+
+        self._aja_rec_frame_num = 0
+        self._aja_audio_sample_offset = 0
+
+        # Audio setup
+        out_ch = cfg.get("audio_channels", 1)
+        self._aja_out_audio_channels = out_ch
+        src_ch = header.get("audio_channels", 0)
+        if src_ch > 0 and self._recorder.audio_writer_input:
+            self._aja_audio_fmt_desc = _aja_create_audio_format_desc(out_ch, 48000)
+            self._aja_audio_extract_buf = bytearray(8192 * out_ch * 4)
+        else:
+            self._aja_audio_fmt_desc = None
+
+        self._recording = True
+        self._set_settings_enabled(False)
+        self._record_btn.setText("Stop Recording")
+        self._record_btn.setStyleSheet("background-color: #cc3333; color: white;")
+        self._statusbar.showMessage(f"Recording AJA → {cfg['output']}...")
+        self._status_timer.start(500)
+
     def _stop_recording(self):
         if not self._recording or not self._recorder:
             return
@@ -782,7 +1149,8 @@ class PjcapGUI(QMainWindow):
         self._recording = False
         self._status_timer.stop()
 
-        # Stop recorder in a background thread to avoid blocking the GUI
+        # Stop recorder in a background thread to avoid blocking the GUI.
+        # For AJA mode, the preview loop keeps running — only the recorder stops.
         recorder = self._recorder
         def do_stop():
             recorder.stop()
@@ -794,8 +1162,8 @@ class PjcapGUI(QMainWindow):
     def _on_recording_stopped(self):
         """Called on the main thread when recording finishes.
 
-        The session is still running (recorder didn't own it), so the
-        preview continues uninterrupted.
+        For AVFoundation: the session keeps running, preview resumes.
+        For AJA: the preview loop keeps running, adaptor is cleared.
         """
         if self._recorder:
             frames = self._recorder.frames_written
@@ -808,13 +1176,19 @@ class PjcapGUI(QMainWindow):
             self._statusbar.showMessage(msg)
             self._recorder = None
 
+        # Clear AJA recording state (preview loop continues)
+        self._aja_adaptor = None
+
         self._recording = False
-        self._previewing = self._session is not None and self._session.isRunning()
+        if self._aja_check.isChecked():
+            self._previewing = self._aja_preview_running
+        else:
+            self._previewing = self._session is not None and self._session.isRunning()
         self._record_btn.setText("Start Recording")
         self._record_btn.setStyleSheet("")
         self._set_settings_enabled(True)
 
-        if not self._previewing:
+        if not self._previewing and not self._aja_check.isChecked():
             QTimer.singleShot(200, self._start_preview)
 
     def _poll_status(self):
@@ -858,12 +1232,12 @@ class PjcapGUI(QMainWindow):
     def _set_settings_enabled(self, enabled):
         """Enable/disable all settings controls."""
         for widget in (
-            self._video_device_combo, self._audio_device_combo, self._audio_check,
+            self._video_device_combo, self._audio_device_combo, self._audio_check, self._aja_check,
             self._codec_combo, self._resolution_combo, self._fps_combo,
             self._bitrate_edit, self._container_combo, self._bit_depth_combo,
             self._chroma_combo, self._color_space_combo,
             self._audio_codec_combo, self._audio_bitrate_edit,
-            self._audio_sample_rate_combo, self._audio_channels_combo,
+            self._audio_sample_rate_combo, self._stereo_check,
             self._output_edit, self._split_duration_edit, self._split_size_edit,
             self._stop_after_edit, self._max_frames_edit,
         ):

@@ -325,11 +325,25 @@ private:
     // ── Audio setup ──
     bool SetupAudio()
     {
-        CaptureConfig cfg(mDeviceSpec);
-        cfg.fInputSource = mInputSource;
-        cfg.fInputChannel = mInputChannel;
-        NTV2AudioSystemSet audSystems(::NTV2MakeAudioSystemSet(mAudioSystem, 1));
-        CNTV2DemoCommon::ConfigureAudioSystems(mDevice, cfg, audSystems);
+        UWord numAudChannels = mDevice.features().GetMaxAudioChannels();
+
+        // For HDMI input, use NTV2_AUDIO_HDMI; for SDI, use NTV2_AUDIO_EMBEDDED
+        if (NTV2_INPUT_SOURCE_IS_HDMI(mInputSource)) {
+            mDevice.SetAudioSystemInputSource(mAudioSystem, NTV2_AUDIO_HDMI,
+                ::NTV2InputSourceToEmbeddedAudioInput(mInputSource));
+        } else {
+            mDevice.SetAudioSystemInputSource(mAudioSystem, NTV2_AUDIO_EMBEDDED,
+                ::NTV2InputSourceToEmbeddedAudioInput(mInputSource));
+        }
+
+        mDevice.SetNumberAudioChannels(numAudChannels, mAudioSystem);
+        mDevice.SetAudioRate(NTV2_AUDIO_48K, mAudioSystem);
+        mDevice.SetAudioBufferSize(NTV2_AUDIO_BUFFER_SIZE_4MB, mAudioSystem);
+        mDevice.SetAudioLoopBack(NTV2_AUDIO_LOOPBACK_OFF, mAudioSystem);
+
+        cerr << "Audio: " << numAudChannels << " channels, 48kHz, "
+             << (NTV2_INPUT_SOURCE_IS_HDMI(mInputSource) ? "HDMI" : "embedded")
+             << " source" << endl;
         return true;
     }
 

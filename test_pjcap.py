@@ -1783,6 +1783,7 @@ class TestGuiAutoStop:
         window._previewing = True
         window._recording = False
         window._recorder = None
+        window._aja_check.isChecked.return_value = False
 
         fake_cfg = {
             "codec": "h264", "width": 1920, "height": 1080,
@@ -1810,6 +1811,7 @@ class TestGuiAutoStop:
         fake_recorder.max_frames = None
 
         with mock.patch.object(gui, "Recorder", return_value=fake_recorder):
+            window._apply_recording_options = lambda: gui.PjcapGUI._apply_recording_options(window)
             gui.PjcapGUI._start_recording(window)
 
         assert fake_recorder.max_seconds == 30.0
@@ -1822,6 +1824,7 @@ class TestGuiAutoStop:
         window._previewing = True
         window._recording = False
         window._recorder = None
+        window._aja_check.isChecked.return_value = False
 
         fake_cfg = {
             "codec": "h264", "width": 1920, "height": 1080,
@@ -1846,6 +1849,7 @@ class TestGuiAutoStop:
         fake_recorder.max_frames = None
 
         with mock.patch.object(gui, "Recorder", return_value=fake_recorder):
+            window._apply_recording_options = lambda: gui.PjcapGUI._apply_recording_options(window)
             gui.PjcapGUI._start_recording(window)
 
         assert fake_recorder.max_seconds is None
@@ -1858,6 +1862,7 @@ class TestGuiAutoStop:
         window._previewing = True
         window._recording = False
         window._recorder = None
+        window._aja_check.isChecked.return_value = False
         window._status_signal = mock.MagicMock()
 
         fake_cfg = {
@@ -1883,6 +1888,7 @@ class TestGuiAutoStop:
         fake_recorder.max_frames = None
 
         with mock.patch.object(gui, "Recorder", return_value=fake_recorder):
+            window._apply_recording_options = lambda: gui.PjcapGUI._apply_recording_options(window)
             gui.PjcapGUI._start_recording(window)
 
         fake_recorder._stop_callback()
@@ -1896,6 +1902,7 @@ class TestGuiAutoStop:
         window._previewing = True
         window._recording = False
         window._recorder = None
+        window._aja_check.isChecked.return_value = False
 
         fake_cfg = {
             "codec": "h264", "width": 1920, "height": 1080,
@@ -1914,6 +1921,7 @@ class TestGuiAutoStop:
         window._max_frames_edit.text.return_value = ""
 
         with mock.patch.object(gui, "Recorder") as MockRecorder:
+            window._apply_recording_options = lambda: gui.PjcapGUI._apply_recording_options(window)
             gui.PjcapGUI._start_recording(window)
 
         msg = window._statusbar.showMessage.call_args[0][0]
@@ -1927,6 +1935,7 @@ class TestGuiAutoStop:
         window._previewing = True
         window._recording = False
         window._recorder = None
+        window._aja_check.isChecked.return_value = False
 
         fake_cfg = {
             "codec": "h264", "width": 1920, "height": 1080,
@@ -1945,6 +1954,7 @@ class TestGuiAutoStop:
         window._max_frames_edit.text.return_value = "abc"
 
         with mock.patch.object(gui, "Recorder") as MockRecorder:
+            window._apply_recording_options = lambda: gui.PjcapGUI._apply_recording_options(window)
             gui.PjcapGUI._start_recording(window)
 
         msg = window._statusbar.showMessage.call_args[0][0]
@@ -1969,6 +1979,7 @@ class TestGuiSplitFields:
         window._previewing = True
         window._recording = False
         window._recorder = None
+        window._aja_check.isChecked.return_value = False
 
         fake_cfg = {
             "codec": "h264", "width": 1920, "height": 1080,
@@ -1996,6 +2007,7 @@ class TestGuiSplitFields:
         fake_recorder.split_size_bytes = None
 
         with mock.patch.object(gui, "Recorder", return_value=fake_recorder):
+            window._apply_recording_options = lambda: gui.PjcapGUI._apply_recording_options(window)
             gui.PjcapGUI._start_recording(window)
 
         assert fake_recorder.split_seconds == 60.0
@@ -2008,6 +2020,7 @@ class TestGuiSplitFields:
         window._previewing = True
         window._recording = False
         window._recorder = None
+        window._aja_check.isChecked.return_value = False
 
         fake_cfg = {
             "codec": "h264", "width": 1920, "height": 1080,
@@ -2033,6 +2046,7 @@ class TestGuiSplitFields:
         fake_recorder.split_size_bytes = None
 
         with mock.patch.object(gui, "Recorder", return_value=fake_recorder):
+            window._apply_recording_options = lambda: gui.PjcapGUI._apply_recording_options(window)
             gui.PjcapGUI._start_recording(window)
 
         assert fake_recorder.split_seconds is None
@@ -2045,6 +2059,7 @@ class TestGuiSplitFields:
         window._previewing = True
         window._recording = False
         window._recorder = None
+        window._aja_check.isChecked.return_value = False
 
         fake_cfg = {
             "codec": "h264", "width": 1920, "height": 1080,
@@ -2066,6 +2081,7 @@ class TestGuiSplitFields:
         window._split_size_edit = split_sz_edit
 
         with mock.patch.object(gui, "Recorder") as MockRecorder:
+            window._apply_recording_options = lambda: gui.PjcapGUI._apply_recording_options(window)
             gui.PjcapGUI._start_recording(window)
 
         # Should show error and not proceed to adopt_session

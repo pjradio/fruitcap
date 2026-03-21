@@ -2182,6 +2182,90 @@ _AJA_PIXEL_FORMATS = {
     "8BitBGRA":   Quartz.kCVPixelFormatType_32BGRA,
 }
 
+# Audio constants for AJA PCM → CMSampleBuffer conversion
+_kAudioFormatLinearPCM = 0x6C70636D
+_kAudioFormatFlagIsSignedInteger = 0x4
+_kAudioFormatFlagIsPacked = 0x8
+
+
+def _aja_create_audio_format_desc(out_channels, sample_rate=48000):
+    """Create a CMAudioFormatDescription for 32-bit signed int PCM input."""
+    import CoreAudio
+    bytes_per_frame = out_channels * 4  # 32-bit = 4 bytes per sample per channel
+    asbd = CoreAudio.AudioStreamBasicDescription()
+    asbd.mSampleRate = float(sample_rate)
+    asbd.mFormatID = _kAudioFormatLinearPCM
+    asbd.mFormatFlags = _kAudioFormatFlagIsSignedInteger | _kAudioFormatFlagIsPacked
+    asbd.mBytesPerPacket = bytes_per_frame
+    asbd.mFramesPerPacket = 1
+    asbd.mBytesPerFrame = bytes_per_frame
+    asbd.mChannelsPerFrame = out_channels
+    asbd.mBitsPerChannel = 32
+    err, fmt_desc = CoreMedia.CMAudioFormatDescriptionCreate(
+        None, asbd, 0, None, 0, None, None, None
+    )
+    if err != 0:
+        return None
+    return fmt_desc
+
+
+def _aja_extract_audio_channels(src_buf, src_size, src_channels, out_channels, dst_buf):
+    """Extract the first out_channels from interleaved 32-bit PCM.
+
+    AJA delivers all 16 channels interleaved as 32-bit signed int.
+    We extract just the first out_channels (1 for mono, 2 for stereo).
+    Returns the number of bytes written to dst_buf.
+    """
+    import struct
+    src_bytes_per_sample = src_channels * 4
+    num_samples = src_size // src_bytes_per_sample
+    dst_bytes_per_sample = out_channels * 4
+    dst_size = num_samples * dst_bytes_per_sample
+
+    if src_channels == out_channels:
+        # No extraction needed
+        dst_buf[:src_size] = src_buf[:src_size]
+        return src_size
+
+    # Extract channels using memoryview for speed
+    src_view = memoryview(src_buf)[:src_size]
+    dst_view = memoryview(dst_buf)[:dst_size]
+    copy_bytes = out_channels * 4  # bytes to copy per sample
+
+    for i in range(num_samples):
+        src_off = i * src_bytes_per_sample
+        dst_off = i * dst_bytes_per_sample
+        dst_view[dst_off:dst_off + copy_bytes] = src_view[src_off:src_off + copy_bytes]
+
+    return dst_size
+
+
+def _aja_make_audio_sample_buffer(audio_data, data_size, fmt_desc, pts):
+    """Create a CMSampleBuffer from raw PCM audio data.
+
+    Returns (sample_buffer, data_ref) — caller must keep data_ref alive
+    until the sample buffer has been consumed by AVAssetWriter.
+    """
+    num_samples = data_size // CoreMedia.CMAudioFormatDescriptionGetStreamBasicDescription(
+        fmt_desc
+    ).mBytesPerFrame
+    # Keep a copy of the data alive — CMBlockBuffer references it without copying.
+    # kCFAllocatorNull tells CoreMedia not to free the memory.
+    data_copy = bytes(audio_data[:data_size])
+    _, block_buf = CoreMedia.CMBlockBufferCreateWithMemoryBlock(
+        None, data_copy, data_size,
+        Foundation.kCFAllocatorNull,  # don't free Python-managed memory
+        None, 0, data_size, 0, None
+    )
+    if block_buf is None:
+        return None, None
+    err, sb = CoreMedia.CMAudioSampleBufferCreateReadyWithPacketDescriptions(
+        None, block_buf, fmt_desc, num_samples, pts, None, None
+    )
+    if err != 0:
+        return None, None
+    return sb, data_copy
+
 
 def _read_exact(stream, n):
     """Read exactly n bytes from a binary stream, or raise EOFError."""
@@ -2349,6 +2433,17 @@ def run_aja_capture(cfg, args, aja_device=None, aja_channel=None, aja_input=None
             dst_height = header["height"]
         dst_buf_size = dst_bpr * dst_height
 
+        # Audio setup
+        src_audio_channels = header.get("audio_channels", 0)
+        out_audio_channels = cfg.get("audio_channels", 1)
+        audio_fmt_desc = None
+        audio_extract_buf = None
+        audio_sample_offset = 0  # running sample count for audio PTS
+        if src_audio_channels > 0 and recorder.audio_writer_input:
+            audio_fmt_desc = _aja_create_audio_format_desc(out_audio_channels, 48000)
+            # Buffer for extracted channels (worst case: ~2000 samples * 2ch * 4 bytes)
+            audio_extract_buf = bytearray(8192 * out_audio_channels * 4)
+
         pipe = proc.stdout
         frame_num = 0
         quit_flag = threading.Event()
@@ -2380,6 +2475,10 @@ def run_aja_capture(cfg, args, aja_device=None, aja_channel=None, aja_input=None
 
         log("Recording from AJA device...")
 
+        # Skip the first frame — AutoCirculate's initial DMA transfer
+        # often catches a partial frame mid-scan.
+        first_frame_skipped = False
+
         try:
             while recorder.running and not quit_flag.is_set():
                 # Read video frame
@@ -2394,12 +2493,31 @@ def run_aja_capture(cfg, args, aja_device=None, aja_channel=None, aja_input=None
 
                 _readinto_exact(pipe, video_buf, video_size)
 
-                # Read audio frame (consumed but not yet encoded — TODO)
+                # Read audio frame
                 audio_size = _read_be32(pipe)
                 if audio_size > 0:
                     if audio_size > len(audio_buf):
                         audio_buf = bytearray(audio_size)
                     _readinto_exact(pipe, audio_buf, audio_size)
+
+                if not first_frame_skipped:
+                    first_frame_skipped = True
+                    recorder.start_time = time.monotonic()
+                    continue
+
+                # Extract channels and append audio sample buffer
+                if audio_size > 0 and audio_fmt_desc and recorder.audio_writer_input:
+                    extracted_size = _aja_extract_audio_channels(
+                        audio_buf, audio_size, src_audio_channels,
+                        out_audio_channels, audio_extract_buf
+                    )
+                    audio_pts = CoreMedia.CMTimeMake(audio_sample_offset, 48000)
+                    audio_sb, _audio_data_ref = _aja_make_audio_sample_buffer(
+                        audio_extract_buf, extracted_size, audio_fmt_desc, audio_pts
+                    )
+                    if audio_sb and recorder.audio_writer_input.isReadyForMoreMediaData():
+                        recorder.audio_writer_input.appendSampleBuffer_(audio_sb)
+                    audio_sample_offset += extracted_size // (out_audio_channels * 4)
 
                 # Create pixel buffer from pool
                 err, pb = Quartz.CVPixelBufferPoolCreatePixelBuffer(None, pool, None)

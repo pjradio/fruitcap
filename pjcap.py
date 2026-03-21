@@ -991,6 +991,7 @@ class Recorder:
         self.cfg = cfg
         self.session = None
         self._session_owned = True
+        self._delegate = None
         self.writer = None
         self.writer_input = None
         self.audio_writer_input = None
@@ -1241,7 +1242,8 @@ class Recorder:
 
         audio_settings = None
         audio_active = self.cfg["audio_only"] or (
-            self.cfg["audio_enabled"] and self._delegate.audio_output is not None
+            self.cfg["audio_enabled"]
+            and (self._delegate is None or self._delegate.audio_output is not None)
         )
         if audio_active:
             if self.cfg["audio_codec"] == "pcm":
@@ -1579,7 +1581,7 @@ class Recorder:
             self._signal_watchdog.cancel()
         if self.compressed_preview:
             self.compressed_preview.invalidate()
-        if self._session_owned:
+        if self._session_owned and self.session:
             self.session.stopRunning()
         elif self._delegate:
             # Disconnect so buffers stop flowing to this recorder
@@ -2171,6 +2173,318 @@ def run_with_preview(recorder, show_source=True, show_compressed=False):
     app.run()
 
 
+# ── AJA capture mode ─────────────────────────────────────────────
+
+# Map AJA pixel format names to CVPixelBuffer format types
+_AJA_PIXEL_FORMATS = {
+    "8BitYCbCr":  Quartz.kCVPixelFormatType_422YpCbCr8,       # 2vuy / UYVY
+    "10BitYCbCr": Quartz.kCVPixelFormatType_422YpCbCr10,       # v210
+    "8BitBGRA":   Quartz.kCVPixelFormatType_32BGRA,
+}
+
+
+def _read_exact(stream, n):
+    """Read exactly n bytes from a binary stream, or raise EOFError."""
+    data = b""
+    while len(data) < n:
+        chunk = stream.read(n - len(data))
+        if not chunk:
+            raise EOFError("aja-capture pipe closed")
+        data += chunk
+    return data
+
+
+def _readinto_exact(stream, buf, n):
+    """Read exactly n bytes into a pre-allocated buffer (bytearray/memoryview)."""
+    view = memoryview(buf)[:n]
+    pos = 0
+    while pos < n:
+        nbytes = stream.readinto(view[pos:])
+        if not nbytes:
+            raise EOFError("aja-capture pipe closed")
+        pos += nbytes
+    return n
+
+
+def _read_be32(stream):
+    """Read a 4-byte big-endian unsigned int from a binary stream."""
+    return int.from_bytes(_read_exact(stream, 4), "big")
+
+
+def run_aja_capture(cfg, args, aja_device=None, aja_channel=None, aja_input=None):
+    """Run capture using the aja-capture helper binary.
+
+    Launches aja-capture as a subprocess, reads the JSON signal header,
+    configures AVAssetWriter with a pixel buffer adaptor, then reads
+    framed video+audio data from the pipe and encodes via VideoToolbox.
+    """
+    import json
+    import struct
+    import subprocess
+
+    # Locate the aja-capture binary
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    aja_bin = os.path.join(script_dir, "build", "aja-capture")
+    if not os.path.isfile(aja_bin):
+        aja_bin = os.path.join(script_dir, "aja-capture")
+    if not os.path.isfile(aja_bin):
+        print("Error: aja-capture binary not found. Build it with: cd build && cmake .. && make")
+        sys.exit(1)
+
+    # Build command
+    cmd = [aja_bin]
+    if aja_device:
+        cmd += ["--device", str(aja_device)]
+    if aja_channel:
+        cmd += ["--channel", str(aja_channel)]
+    if aja_input:
+        cmd += ["--input", str(aja_input)]
+    if not cfg.get("audio_enabled", True):
+        cmd.append("--no-audio")
+
+    log(f"Launching: {' '.join(cmd)}")
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stdin=subprocess.PIPE,
+        stderr=None,  # inherit stderr so user sees aja-capture status
+        bufsize=16 * 1024 * 1024,  # 16MB buffer — UHD UYVY frames are ~16MB each
+    )
+
+    try:
+        # Read JSON header line
+        header_line = proc.stdout.readline()
+        if not header_line:
+            print("Error: aja-capture exited without producing a header.")
+            proc.wait()
+            sys.exit(1)
+        header = json.loads(header_line)
+        log(f"AJA signal: {header['video_format']} "
+            f"{header['width']}x{header['height']} "
+            f"{header['fps_num']}/{header['fps_den']}fps "
+            f"{header['pixel_format']}")
+
+        # Override cfg with detected signal parameters
+        cfg["width"] = header["width"]
+        cfg["height"] = header["height"]
+        if header["fps_den"] and header["fps_num"]:
+            cfg["fps"] = header["fps_num"] / header["fps_den"]
+        if header["audio_channels"] > 0:
+            cfg["audio_sample_rate"] = header.get("audio_sample_rate", 48000)
+            # Keep cfg["audio_channels"] from pjcap.cfg — the AJA device
+            # reports max embedded channels (e.g. 16) which exceeds what
+            # AAC/ALAC encoders support.
+
+        # Determine CVPixelBuffer format
+        cv_pixfmt = _AJA_PIXEL_FORMATS.get(header["pixel_format"])
+        if cv_pixfmt is None:
+            print(f"Error: Unsupported AJA pixel format '{header['pixel_format']}'")
+            proc.stdin.write(b"stop\n")
+            proc.stdin.flush()
+            proc.wait()
+            sys.exit(1)
+
+        # Create Recorder and writer (no AVCaptureSession needed)
+        recorder = Recorder(cfg)
+        apply_runtime_options(recorder, args)
+        recorder.setup_writer()
+
+        # Create pixel buffer adaptor BEFORE starting the writer
+        pb_attrs = {
+            str(Quartz.kCVPixelBufferPixelFormatTypeKey): int(cv_pixfmt),
+            str(Quartz.kCVPixelBufferWidthKey): header["width"],
+            str(Quartz.kCVPixelBufferHeightKey): header["height"],
+        }
+        adaptor = AVF.AVAssetWriterInputPixelBufferAdaptor.alloc()\
+            .initWithAssetWriterInput_sourcePixelBufferAttributes_(
+                recorder.writer_input, pb_attrs
+            )
+
+        recorder.start()
+
+        # Wait for writer to start
+        if not recorder.writer or recorder.writer.status() != AVF.AVAssetWriterStatusWriting:
+            print("Error: AVAssetWriter failed to start.")
+            proc.stdin.write(b"stop\n")
+            proc.stdin.flush()
+            proc.wait()
+            sys.exit(1)
+
+        # Start the writer session at time zero
+        start_pts = CoreMedia.CMTimeMake(0, 30000)
+        recorder.writer.startSessionAtSourceTime_(start_pts)
+        recorder._segment_session_started = True
+        recorder._segment_start_timestamp = start_pts
+        recorder.start_time = time.monotonic()
+        recorder._start_timestamp = start_pts
+        recorder.started_writing.set()
+
+        # Write timecode sample
+        recorder._write_timecode_sample(start_pts)
+
+        # Compute frame duration in 30000 timescale
+        if header["fps_den"] and header["fps_num"]:
+            frame_duration_ticks = int(30000 * header["fps_den"] / header["fps_num"])
+        else:
+            frame_duration_ticks = 1001  # default 29.97
+
+        pool = adaptor.pixelBufferPool()
+        if not pool:
+            print("Error: Pixel buffer pool not available.")
+            proc.stdin.write(b"stop\n")
+            proc.stdin.flush()
+            proc.wait()
+            sys.exit(1)
+
+        # Pre-compute stride info (constant per session)
+        err0, pb0 = Quartz.CVPixelBufferPoolCreatePixelBuffer(None, pool, None)
+        if err0 == 0 and pb0:
+            Quartz.CVPixelBufferLockBaseAddress(pb0, 0)
+            dst_bpr = Quartz.CVPixelBufferGetBytesPerRow(pb0)
+            dst_height = Quartz.CVPixelBufferGetHeight(pb0)
+            Quartz.CVPixelBufferUnlockBaseAddress(pb0, 0)
+            del pb0
+        else:
+            dst_bpr = header["width"] * 2
+            dst_height = header["height"]
+        dst_buf_size = dst_bpr * dst_height
+
+        pipe = proc.stdout
+        frame_num = 0
+        quit_flag = threading.Event()
+
+        # Pre-allocate reusable frame buffers to avoid per-frame 16MB allocations
+        expected_video_size = dst_bpr * header["height"]
+        video_buf = bytearray(expected_video_size + 4096)  # small padding
+        audio_buf = bytearray(256 * 1024)  # 256K for audio per frame
+
+        # Check stride match once (constant per session)
+        strides_match = None  # determined on first frame
+
+        # Background thread to watch for 'q' on stdin
+        def _stdin_watcher():
+            try:
+                while not quit_flag.is_set():
+                    ready, _, _ = select.select([sys.stdin], [], [], 0.25)
+                    if ready:
+                        line = sys.stdin.readline()
+                        if line == "" or line.strip().lower() == "q":
+                            quit_flag.set()
+                            return
+            except Exception:
+                pass
+
+        if sys.stdin.isatty():
+            stdin_thread = threading.Thread(target=_stdin_watcher, daemon=True)
+            stdin_thread.start()
+
+        log("Recording from AJA device...")
+
+        try:
+            while recorder.running and not quit_flag.is_set():
+                # Read video frame
+                try:
+                    video_size = _read_be32(pipe)
+                except EOFError:
+                    break
+
+                # Grow buffer if needed (shouldn't happen after first frame)
+                if video_size > len(video_buf):
+                    video_buf = bytearray(video_size)
+
+                _readinto_exact(pipe, video_buf, video_size)
+
+                # Read audio frame (consumed but not yet encoded — TODO)
+                audio_size = _read_be32(pipe)
+                if audio_size > 0:
+                    if audio_size > len(audio_buf):
+                        audio_buf = bytearray(audio_size)
+                    _readinto_exact(pipe, audio_buf, audio_size)
+
+                # Create pixel buffer from pool
+                err, pb = Quartz.CVPixelBufferPoolCreatePixelBuffer(None, pool, None)
+                if err != 0 or not pb:
+                    continue
+
+                # Copy video data into pixel buffer
+                Quartz.CVPixelBufferLockBaseAddress(pb, 0)
+                base = Quartz.CVPixelBufferGetBaseAddress(pb)
+                dst = base.as_buffer(dst_buf_size)
+
+                if strides_match is None:
+                    src_bpr = video_size // header["height"] if header["height"] else dst_bpr
+                    strides_match = (src_bpr == dst_bpr)
+
+                if strides_match:
+                    copy_len = min(video_size, dst_buf_size)
+                    dst[:copy_len] = video_buf[:copy_len]
+                else:
+                    src_bpr = video_size // header["height"]
+                    row_copy = min(src_bpr, dst_bpr)
+                    for row in range(min(header["height"], dst_height)):
+                        src_off = row * src_bpr
+                        dst_off = row * dst_bpr
+                        dst[dst_off:dst_off + row_copy] = video_buf[src_off:src_off + row_copy]
+
+                Quartz.CVPixelBufferUnlockBaseAddress(pb, 0)
+
+                # Append with timestamp
+                pts = CoreMedia.CMTimeMake(frame_num * frame_duration_ticks, 30000)
+                if recorder.writer_input.isReadyForMoreMediaData():
+                    adaptor.appendPixelBuffer_withPresentationTime_(pb, pts)
+                    frame_num += 1
+                    recorder.frames_written = frame_num
+
+                    if frame_num % 30 == 0:
+                        elapsed = time.monotonic() - recorder.start_time
+                        fps_actual = frame_num / elapsed if elapsed > 0 else 0
+                        print(f"\r  {frame_num} frames, {elapsed:.1f}s, {fps_actual:.1f} fps", end="", flush=True)
+
+                # Check stop conditions
+                if recorder.max_frames and frame_num >= recorder.max_frames:
+                    break
+                if recorder.max_seconds:
+                    elapsed = time.monotonic() - recorder.start_time
+                    if elapsed >= recorder.max_seconds:
+                        break
+
+        except KeyboardInterrupt:
+            pass
+
+        quit_flag.set()
+        print()
+        log("Stopping AJA capture...")
+        _aja_cleanup(proc, recorder, frame_num, cfg["output"])
+
+    except Exception as exc:
+        print(f"\nError during AJA capture: {exc}")
+        _aja_cleanup(proc, recorder if 'recorder' in dir() else None, 0, "")
+        sys.exit(1)
+
+
+def _aja_cleanup(proc, recorder, frame_num, output_path):
+    """Shut down aja-capture subprocess and finalize recording."""
+    import subprocess
+
+    # Signal aja-capture to stop
+    try:
+        proc.stdin.write(b"stop\n")
+        proc.stdin.flush()
+    except (BrokenPipeError, OSError):
+        pass
+
+    # Finalize recording
+    if recorder:
+        recorder.stop()
+
+    # Wait for subprocess, kill if it doesn't exit
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
 def run_headless(recorder):
     """Run capture in headless (no preview) mode with signal handling."""
     signal.signal(signal.SIGTERM, lambda *_: recorder.stop())
@@ -2310,6 +2624,23 @@ def build_parser():
         "--split-size", metavar="SIZE",
         help="Split recording when file reaches this size (e.g., 500m, 2g)",
     )
+    # AJA capture mode
+    parser.add_argument(
+        "--aja", action="store_true",
+        help="Capture from AJA device via aja-capture helper instead of AVFoundation",
+    )
+    parser.add_argument(
+        "--aja-device", metavar="SPEC",
+        help="AJA device index, serial, or model name (default: 0)",
+    )
+    parser.add_argument(
+        "--aja-channel", type=int, metavar="N",
+        help="AJA input channel 1-8 (default: 1)",
+    )
+    parser.add_argument(
+        "--aja-input", metavar="SOURCE",
+        help="AJA input source: hdmi, hdmi1-4, sdi (default: auto-detect)",
+    )
     return parser
 
 
@@ -2421,6 +2752,16 @@ def main():
         print(f"Formats for {device.localizedName()}:")
         for line in format_device_formats(get_device_formats(device)):
             print(line)
+        sys.exit(0)
+
+    if args.aja:
+        # AJA capture mode — bypass AVCaptureSession entirely
+        run_aja_capture(
+            cfg, args,
+            aja_device=args.aja_device,
+            aja_channel=args.aja_channel,
+            aja_input=args.aja_input,
+        )
         sys.exit(0)
 
     if cfg["audio_only"]:

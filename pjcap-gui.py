@@ -952,6 +952,14 @@ class PjcapGUI(QMainWindow):
                         recorder.audio_writer_input.appendSampleBuffer_(audio_sb)
                     self._aja_audio_sample_offset += extracted_size // (out_ch * 4)
 
+                # Check stop conditions
+                if recorder.max_frames and self._aja_rec_frame_num >= recorder.max_frames:
+                    self._status_signal.stop_requested.emit()
+                elif recorder.max_seconds:
+                    elapsed = time.monotonic() - recorder.start_time
+                    if elapsed >= recorder.max_seconds:
+                        self._status_signal.stop_requested.emit()
+
             frame_num += 1
 
     def _aja_compute_audio_levels(self, audio_buf, audio_size, src_channels):

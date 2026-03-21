@@ -22,6 +22,16 @@ pip install PyQt5
 
 The analysis utilities (`frametimes.py`, `qpdump.py`) require [ffmpeg/ffprobe](https://ffmpeg.org/) on `PATH`. `frametimes.py` optionally uses [mediainfo](https://mediaarea.net/en/MediaInfo) for additional detail.
 
+### AJA Device Support
+
+AJA capture mode requires the [AJA NTV2 SDK](https://github.com/aja-video/ntv2) and a C++ build of the `aja-capture` helper:
+
+```bash
+cd build && cmake .. && make
+```
+
+The resulting `aja-capture` binary (or a copy in the project root) is launched as a subprocess by both `pjcap.py --aja` and the GUI's AJA checkbox.
+
 ## Tools
 
 | File | Description |
@@ -31,6 +41,7 @@ The analysis utilities (`frametimes.py`, `qpdump.py`) require [ffmpeg/ffprobe](h
 | `frametimes.py` | Frame timing analysis for captured files |
 | `qpdump.py` | Per-frame QP (quantization parameter) dump for H.264/H.265 files |
 | `list_encoders.py` | List all VideoToolbox encoders available on the system |
+| `aja-capture.cpp` | C++ helper for AJA NTV2 device capture (built via CMake) |
 
 ## pjcap.py — Command-Line Capture
 
@@ -103,6 +114,10 @@ python3 pjcap.py --vu
 | `-q`, `--quiet` | Suppress status output |
 | `--split-every` | Split into segments every N seconds |
 | `--split-size` | Split into segments at size threshold, e.g. `500m`, `2g` |
+| `--aja` | Capture from AJA device instead of AVFoundation |
+| `--aja-device` | AJA device index, serial, or model name |
+| `--aja-channel` | AJA input channel 1-8 (default: 1) |
+| `--aja-input` | AJA input source: `hdmi`, `hdmi1`-`hdmi4`, `sdi` (default: auto-detect) |
 
 ## pjcap-gui.py — GUI Capture
 
@@ -118,6 +133,7 @@ A PyQt5 GUI that wraps the same capture engine as `pjcap.py`. Features:
 - **Full codec/format controls** — Codec, resolution, FPS, bitrate, bit depth, chroma, color space, container
 - **Audio settings** — Codec (AAC/ALAC/PCM), bitrate, sample rate, channels
 - **Recording controls** — Start/stop button, segment splitting, auto-stop by duration or frame count
+- **AJA capture mode** — Checkbox to capture from AJA devices (auto-detected); preview restarts automatically when bit depth changes to configure the device for 8-bit or 10-bit capture
 - **Seamless preview-to-recording** — Session stays running when recording starts/stops, so the preview is uninterrupted
 - **Keyboard shortcuts** — Esc to stop recording, Q to quit
 
